@@ -81,6 +81,53 @@ def transcribe(audio, room_language, model, rate=16000):
 	return lines
 
 
+def envelope(audio, rate=16000, pas=1600):
+	"""RMS per 100 ms — the shape of the speech, not its content."""
+	import numpy as np
+
+	n = len(audio) // pas * pas
+	if n == 0:
+		return np.zeros(0, dtype=np.float32)
+	return np.sqrt((audio[:n].reshape(-1, pas) ** 2).mean(axis=1))
+
+
+def measure_offset(mix, track, maximum=30.0, rate=16000):
+	"""Find s such that mix[t] looks like track[t + s], in seconds.
+
+	WHY MEASURE INSTEAD OF TRUSTING TIMESTAMPS: the capture joins at the
+	"starting" state, up to a dozen seconds before the recorder writes its
+	first sample, and that lead differs per participant. On a live recording
+	the .srt placed speech at 0 s where the .webm was silent for 12 s — the
+	assumption was wrong, the measurement is what the prototype used to get
+	6.4 s and 11.2 s.
+
+	Returns (offset, confidence); confidence is the correlation at the best
+	shift, and the caller ignores an offset below 0.4.
+	"""
+	import numpy as np
+
+	em = envelope(mix, rate)
+	ep = envelope(track, rate)
+	meilleur, meilleur_s = -1.0, 0.0
+	pas = int(maximum * 10)
+	for d in range(-pas, pas + 1):
+		# mix[t] ~ track[t + d/10]
+		if d >= 0:
+			a, b = em[d:], ep[:len(em) - d]
+		else:
+			a, b = em[:d], ep[-d:]
+		n = min(len(a), len(b))
+		if n < 50:
+			continue
+		a, b = a[:n], b[:n]
+		if a.std() == 0 or b.std() == 0:
+			continue
+		c = float(np.corrcoef(a, b)[0, 1])
+		if c > meilleur:
+			meilleur, meilleur_s = c, d / 10.0
+	return meilleur_s, meilleur
+
+
 def timestamp(t):
 	h, rest = divmod(max(0.0, t), 3600)
 	m, s = divmod(rest, 60)
@@ -102,6 +149,11 @@ def main():
 	if os.path.exists(path):
 		names = json.load(open(path))
 
+	mix = None
+	chemin_mix = os.path.join(folder, "webm.webm")
+	if os.path.exists(chemin_mix):
+		mix = pcm(chemin_mix)
+
 	from faster_whisper import WhisperModel
 
 	model = WhisperModel(MODEL, device="cpu", compute_type="int8",
@@ -113,7 +165,17 @@ def main():
 		who = names.get(session, "participant " + session[:6])
 		# Each track opens at its own moment: the WebRTC subscription is not
 		# simultaneous, and the gap differs per participant.
+		# Measured alignment when the recording is available; the timestamp
+		# reference is only a fallback (and it is known to be off by the
+		# capture's lead).
 		reference = tracks.get(session, webm_start)
+		if mix is not None:
+			mesure, confiance = measure_offset(mix, pcm(track))
+			print("side %s: measured offset %.1fs (confidence %.2f)" % (session[:8], mesure, confiance), flush=True)
+			if confiance >= 0.4:
+				reference = webm_start + mesure
+			else:
+				print("  confidence too low, keeping the timestamp reference", flush=True)
 		for seg in transcribe(pcm(track), room_language, model):
 			start = seg["start"] + reference - webm_start
 			end = seg["end"] + reference - webm_start

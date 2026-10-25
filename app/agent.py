@@ -195,6 +195,17 @@ def finaliser(jeton, etat):
 
 	debut_webm = float(calendar.timegm(time.strptime(nom + "Z", "%Y-%m-%dT%H-%M-%SZ")))
 
+	# THE MIX IS FETCHED, to MEASURE the alignment instead of assuming it.
+	# It travels base64-encoded: the exec stream decodes stdout as UTF-8, so a
+	# binary read comes back corrupted.
+	pod = pod_de(NS_FILES, "app=nextcloud")
+	try:
+		encode = executer(NS_FILES, pod, ["sh", "-c", "base64 -w0 '%s'" % webm])
+		with open(os.path.join(TRAVAIL, "webm.webm"), "wb") as f:
+			f.write(base64.b64decode(encode))
+	except Exception as e:
+		print("mix not fetched (%r): alignment falls back to timestamps" % e, flush=True)
+
 	sessions = [os.path.basename(p)[:-len(".opus")] for p in os.listdir(PISTES) if p.endswith(".opus")]
 	with open(os.path.join(PISTES, "noms.json"), "w") as f:
 		json.dump(noms(jeton, sessions), f)
@@ -213,10 +224,11 @@ def finaliser(jeton, etat):
 			os.remove(os.path.join(PISTES, reste))
 		except FileNotFoundError:
 			pass
-	try:
-		os.remove(os.path.join(TRAVAIL, "transcription.srt"))
-	except FileNotFoundError:
-		pass
+	for reste in ("transcription.srt", "webm.webm"):
+		try:
+			os.remove(os.path.join(TRAVAIL, reste))
+		except FileNotFoundError:
+			pass
 
 
 def boucle():

@@ -1,0 +1,10 @@
+# Versions relevées sur l'installation où le client fonctionne (app de
+# transcription, ceffio.org) : les reproduire évite de découvrir, en
+# production, qu'un changement d'API de websockets casse l'abonnement.
+aiortc==1.15.0
+websockets==17.0.1
+pydantic==2.13.4
+numpy==2.5.2
+av==17.1.0
+faster-whisper==1.2.1
+kubernetes==33.1.0

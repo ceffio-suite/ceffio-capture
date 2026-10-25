@@ -121,7 +121,7 @@ async def main():
 				await client.add_target(nc_sid)
 				ajoutes.add(nc_sid)
 			with open(os.path.join(SORTIE, "participants.json"), "w") as f:
-				json.dump(client.roster, f, indent=2, ensure_ascii=False)
+				json.dump(getattr(client, "roster", {}), f, indent=2, ensure_ascii=False)
 			await asyncio.sleep(2)
 	finally:
 		await client.close()

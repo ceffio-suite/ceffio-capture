@@ -1,13 +1,11 @@
-"""Substitut minimal de nc_py_api pour le service de capture.
+"""Minimal stand-in for nc_py_api, for the capture service.
 
-Le client de signaling est repris de l'app de transcription, où Nextcloud lui
-fournit l'URL du backend et ses réglages HPB. Ici, rien de tout cela n'existe :
-la configuration vient de l'environnement (CEFFIO_NEXTCLOUD_URL, CEFFIO_HPB_URL,
-CEFFIO_INTERNAL_SECRET), et les seules fonctions réellement utilisées par le
-client sont l'URL du backend et le secret interne.
+The signaling client is taken from the transcription app, where Nextcloud
+supplies the backend URL and the HPB settings. None of that exists here: the
+configuration comes from the environment.
 
-Toute autre fonction lève : un substitut muet laisserait croire que la
-traduction ou l'AppAPI sont disponibles.
+Everything else raises: a silent stand-in would suggest that translation or the
+AppAPI are available.
 """
 import os
 
@@ -16,9 +14,15 @@ class NextcloudException(Exception):
 	pass
 
 
+class _Options:
+	# get_ssl_context() checks this before falling back to the default context.
+	nc_cert = None
+
+
 class _AppCfg:
 	def __init__(self):
 		self.endpoint = os.environ.get("CEFFIO_NEXTCLOUD_URL", "")
+		self.options = _Options()
 
 
 class NextcloudApp:
@@ -27,8 +31,8 @@ class NextcloudApp:
 
 	def ocs(self, *args, **kwargs):
 		raise RuntimeError(
-			"nc_py_api n'est pas disponible dans le service de capture : "
-			"la configuration vient de l'environnement"
+			"nc_py_api is not available in the capture service: "
+			"configuration comes from the environment"
 		)
 
 

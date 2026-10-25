@@ -76,7 +76,8 @@ class SpreedClient:
 		self.peer_connection_lock = asyncio.Lock()
 		self.targets: dict[str, Target] = {}
 		self.target_lock = asyncio.Lock()
-		self.nc_sid_map: dict[str, str] = {}  # {"nc_session_id": "session_id"}, use the same target lock
+		self.nc_sid_map: dict[str, str] = {}
+		self.roster: dict[str, dict] = {}  # {"nc_session_id": "session_id"}, use the same target lock
 		# the first target's Nextcloud session ID, used to defer the first target add until we join the call
 		self._nc_sid_wait_stash: dict[str, None] = {}
 		self.transcript_queue: asyncio.Queue = asyncio.Queue()
@@ -945,6 +946,7 @@ class SpreedClient:
 							# todo: get the userid for the session ids and maintain a map in "sid_translation_lang_map"
 							# todo: use the ownerId of the room for the OCP translations, using talk api, or something.
 							self.nc_sid_map[user_desc["nextcloudSessionId"]] = user_desc["sessionId"]
+							self.roster[user_desc["sessionId"]] = dict(user_desc)
 
 					# if this is one of the deferred targets, add it to the targets
 					if (user_desc["nextcloudSessionId"] in self._nc_sid_wait_stash):

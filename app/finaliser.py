@@ -39,14 +39,46 @@ def pcm(path):
 	return np.concatenate(blocks).astype(np.float32) / 32768.0
 
 
-def transcribe(audio, room_language, model):
-	segments, info = model.transcribe(audio, language=None, beam_size=5, vad_filter=True)
-	print("detected language: %s (%.2f)" % (info.language, info.language_probability), flush=True)
-	if info.language_probability < 0.5 and room_language:
-		print("  low confidence -> room language: %s" % room_language, flush=True)
-		segments, info = model.transcribe(audio, language=room_language, beam_size=5, vad_filter=True)
-	return [{"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
-		for s in segments if s.text.strip()]
+def speech_chunks(audio, rate=16000):
+	"""Speech regions of one track, in samples, with a little padding."""
+	from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+	regions = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=400, speech_pad_ms=200))
+	return [(int(r["start"]), int(r["end"])) for r in regions]
+
+
+def transcribe(audio, room_language, model, rate=16000):
+	"""Transcribe one track, deciding the language PER SPEECH CHUNK.
+
+	ONE DECISION PER TRACK WAS WRONG, and it was observed: a participant who
+	speaks French and ends with one Arabic sentence had the whole track forced
+	through the Arabic model, because detection saw 0.66 for Arabic and the
+	French majority was lost. A call is not always monolingual — a meeting in
+	Algeria certainly is not.
+
+	Each chunk is detected on its own; the room language is the tie-breaker
+	when the detection is not confident.
+	"""
+	lines = []
+	for start, end in speech_chunks(audio, rate):
+		chunk = audio[start:end]
+		if len(chunk) < rate:
+			continue
+		segments, info = model.transcribe(chunk, language=None, beam_size=5, vad_filter=False)
+		language = info.language
+		if info.language_probability < 0.6 and room_language:
+			language = room_language
+			segments, info = model.transcribe(chunk, language=language, beam_size=5, vad_filter=False)
+		for s in segments:
+			text = s.text.strip()
+			if text:
+				lines.append({
+					"start": start / rate + float(s.start),
+					"end": start / rate + float(s.end),
+					"text": text,
+					"language": language,
+				})
+	return lines
 
 
 def timestamp(t):

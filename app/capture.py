@@ -17,7 +17,6 @@ import json
 import os
 import sys
 import time
-import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
@@ -30,25 +29,33 @@ TRAVAIL = os.environ.get("CEFFIO_WORK", "/work")
 SORTIE = os.path.join(TRAVAIL, "pistes")
 
 
-class PisteWav:
-	"""Remplace le transcripteur de l'app : écrit les frames dans un WAV."""
+class PisteOpus:
+	"""Remplace le transcripteur de l'app : encode chaque piste en Opus.
+
+	PAS DE WAV INTERMÉDIAIRE : le flux WebRTC est en Opus, on le ré-encode à un
+	débit voisin (32 kbit/s mono) et c'est ce fichier que la transcription
+	relit. Un WAV ne ferait que multiplier le disque par dix pour un format que
+	personne ne livre.
+	"""
 
 	def __init__(self, sid, *args, **kwargs):
 		self.sid = sid
-		self.fichier = None
+		self.conteneur = None
+		self.piste = None
 		self.tache = None
 		self.ouvert = time.time()
-		self.resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+		self.resampler = av.AudioResampler(format="s16", layout="mono", rate=48000)
 
 	async def connect(self):
 		return None
 
 	async def start(self, stream):
-		chemin = os.path.join(SORTIE, f"{self.sid}.wav")
-		self.fichier = wave.open(chemin, "wb")
-		self.fichier.setnchannels(1)
-		self.fichier.setsampwidth(2)
-		self.fichier.setframerate(16000)
+		chemin = os.path.join(SORTIE, f"{self.sid}.opus")
+		self.conteneur = av.open(chemin, "w", format="ogg")
+		self.piste = self.conteneur.add_stream("libopus", rate=48000)
+		self.piste.layout = "mono"
+		self.piste.bit_rate = 32000
+
 		# L'instant d'ouverture de la piste : l'abonnement WebRTC n'arrive pas
 		# au début de l'enregistrement, et le délai varie par participant.
 		journal = os.path.join(SORTIE, "pistes.json")
@@ -69,19 +76,23 @@ class PisteWav:
 			while True:
 				frame = await stream.receive()
 				for sortie in self.resampler.resample(frame):
-					self.fichier.writeframes(sortie.to_ndarray().tobytes())
+					sortie.pts = None
+					for paquet in self.piste.encode(sortie):
+						self.conteneur.mux(paquet)
 		except Exception as e:
 			print(f"fin de piste {self.sid[:10]} : {e!r}", flush=True)
 		finally:
 			self._fermer()
 
 	def _fermer(self):
-		if self.fichier is not None:
+		if self.conteneur is not None:
 			try:
-				self.fichier.close()
+				for paquet in self.piste.encode(None):
+					self.conteneur.mux(paquet)
+				self.conteneur.close()
 			except Exception:
 				pass
-			self.fichier = None
+			self.conteneur = None
 
 	async def shutdown(self):
 		if self.tache is not None:
@@ -89,7 +100,8 @@ class PisteWav:
 		self._fermer()
 
 
-spreed_client.VoskTranscriber = PisteWav
+spreed_client.VoskTranscriber = PisteOpus
+
 
 
 async def main():

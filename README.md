@@ -1,66 +1,65 @@
 # ceffio-capture
 
-Capture l'audio **par participant** pendant un enregistrement Talk, puis
-transcrit chaque piste sur le CPU.
+Captures **one audio track per participant** during a Talk recording, then
+transcribes each track on the CPU.
 
-## Ce que ça fait
+## What it does
 
-Quand un enregistrement démarre dans un appel Talk, ce service rejoint l'appel
-comme client interne (par le signaling, avec le secret partagé) et reçoit du
-SFU **une piste audio par participant** — là où le `.webm` de Talk n'a qu'un
-mélange. À l'arrêt :
+When a recording starts in a Talk call, this service joins the call as an
+internal client (through the signaling, with the shared secret) and receives
+**one audio track per participant** from the SFU — whereas the `.webm` Talk
+records is a single mix. When the recording stops:
 
-- une piste **Opus 32 kbit/s** par participant (~14 Mo/h), à côté du `.webm` ;
-- un **`.srt` nommé** (qui parle), recalé sur le début du `.webm` ;
-- les sous-titres **incrustés dans le `.webm`** (piste WebVTT, copie de flux).
+- one **Opus 32 kbit/s** track per participant (~14 MB/h), next to the `.webm`;
+- a **named `.srt`** (who spoke), re-aligned on the recording start;
+- the subtitles are **muxed into the `.webm`** (WebVTT track, stream copy).
 
-La transcription est faite par **faster-whisper en int8, CPU uniquement**
-(mesuré ×7–11 la durée de l'audio sur 8 threads), avec détection de la langue
-**par piste** : deux participants peuvent parler deux langues différentes.
+Transcription uses **faster-whisper in int8, CPU only** (measured ×7–11 real
+time on 8 threads), with **per-track language detection**: two participants may
+speak two different languages in the same call.
 
-## Déploiement
+The `small` model is **baked into the image**: a fresh installation transcribes
+its first recording without a download.
 
-L'image est déployée par le module `capture` du dépôt
-[ceffio](https://github.com/ceffio-suite/ceffio) :
+## Deployment
+
+The image is deployed by the `capture` module of the
+[ceffio](https://github.com/ceffio-suite/ceffio) repository:
 
 ```sh
 ceffio module install capture
 ```
 
-Variables attendues :
+Expected environment:
 
-| Variable | Rôle |
+| Variable | Role |
 |---|---|
-| `CEFFIO_HPB_URL` | `wss://spreed.<domaine>/spreed` |
-| `CEFFIO_NEXTCLOUD_URL` | `https://cloud.<domaine>` |
-| `CEFFIO_INTERNAL_SECRET` | secret partagé du signaling |
-| `CEFFIO_WORK` | répertoire de travail (défaut `/work`) |
-| `CEFFIO_MODELS` | volume des modèles (défaut `/models`) |
-| `CEFFIO_MODEL` | `small` (défaut), `medium`, … |
-| `CEFFIO_THREADS` | threads CPU pour la transcription (défaut 4) |
+| `CEFFIO_HPB_URL` | `wss://spreed.<domain>/spreed` |
+| `CEFFIO_NEXTCLOUD_URL` | `https://cloud.<domain>` |
+| `CEFFIO_INTERNAL_SECRET` | shared signaling secret |
+| `CEFFIO_WORK` | working directory (default `/work`) |
+| `CEFFIO_MODELS` | model directory (default `/models`, baked in) |
+| `CEFFIO_MODEL` | `small` (default), `medium`, … |
+| `CEFFIO_THREADS` | CPU threads for transcription (default 4) |
 
-Droits Kubernetes nécessaires (créés par le module) : `pods/exec` dans le
-namespace Nextcloud (dépôt des fichiers, `occ files:scan`) et dans celui de la
-base (état d'enregistrement, langue de la salle).
+Kubernetes rights (created by the module): `pods/exec` in the Nextcloud
+namespace (deposit files, `occ files:scan`) and in the database namespace
+(recording state, room language).
 
-## Construction
+## Build
 
 ```sh
 docker build --platform linux/amd64 -t ceffio-capture .
 ```
 
-Les modèles **ne sont pas** dans l'image : ils sont téléchargés au premier
-usage dans le volume monté sur `/models`.
-
 ## Provenance
 
-Le client de signaling (`app/lib/spreed_client.py` et ses modules) vient de
-l'application [live_transcription](https://github.com/nextcloud/live_transcription)
-de Nextcloud (AGPL-3.0). Il est vendé et adapté : la configuration vient de
-l'environnement au lieu d'AppAPI, et le transcripteur en direct est remplacé
-par une écriture sur disque. C'est ce chemin qui est éprouvé en production —
-le réécrire serait un risque, pas une simplification.
+The signaling client (`app/lib/spreed_client.py` and its modules) comes from
+Nextcloud's [live_transcription](https://github.com/nextcloud/live_transcription)
+application (AGPL-3.0). It is vendored and adapted: configuration comes from the
+environment instead of AppAPI, and the live transcriber is replaced by disk
+writes. That path is proven in production — rewriting it would be a risk.
 
 ## Licence
 
-AGPL-3.0-or-later. Voir [LICENSE](LICENSE).
+AGPL-3.0-or-later. See [LICENSE](LICENSE).

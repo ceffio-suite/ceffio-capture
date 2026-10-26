@@ -1,7 +1,7 @@
-"""Client de capture : rejoint un appel Talk et écrit UNE PISTE PAR PARTICIPANT.
+"""Capture client: joins a Talk call and writes ONE TRACK PER PARTICIPANT.
 
-Le signaling et la négociation WebRTC viennent du client de l'app de
-transcription (lib/spreed_client.py, vendé et patché) : ce chemin est éprouvé.
+Signaling and WebRTC negotiation come from the transcription app's client
+(lib/spreed_client.py, vendored and patched): that path is proven.
 Seule la destination de l'audio change — un fichier WAV par participant, au
 lieu du transcripteur en direct.
 
@@ -9,8 +9,8 @@ Variables d'environnement :
   CEFFIO_ROOM              jeton de la salle
   CEFFIO_HPB_URL           wss://spreed.<domaine>/spreed
   CEFFIO_NEXTCLOUD_URL     https://cloud.<domaine>
-  CEFFIO_INTERNAL_SECRET   secret partagé du signaling
-  CEFFIO_WORK              répertoire de travail (défaut /work)
+  CEFFIO_INTERNAL_SECRET   shared signaling secret
+  CEFFIO_WORK              working directory (default /work)
 """
 import asyncio
 import json
@@ -30,12 +30,12 @@ SORTIE = os.path.join(TRAVAIL, "pistes")
 
 
 class PisteOpus:
-	"""Remplace le transcripteur de l'app : encode chaque piste en Opus.
+	"""Stand-in for the app's transcriber: encodes each track to Opus.
 
-	PAS DE WAV INTERMÉDIAIRE : le flux WebRTC est en Opus, on le ré-encode à un
-	débit voisin (32 kbit/s mono) et c'est ce fichier que la transcription
-	relit. Un WAV ne ferait que multiplier le disque par dix pour un format que
-	personne ne livre.
+	NO INTERMEDIATE WAV: the WebRTC stream is already Opus; it is re-encoded at
+	a neighbouring bitrate (32 kbit/s mono) and that file is what transcription
+	reads back. A WAV would only multiply disk usage by ten for a format nobody
+	delivers.
 	"""
 
 	def __init__(self, sid, *args, **kwargs):
@@ -68,8 +68,8 @@ class PisteOpus:
 		self.piste.layout = "mono"
 		self.piste.bit_rate = 32000
 
-		# L'instant d'ouverture n'est PAS écrit ici : la piste n'a pas encore
-		# d'audio. Voir _dater() dans la boucle de réception.
+		# The opening time is NOT written here: the track has no audio yet.
+		# See _dater() in the receive loop.
 		print(f"piste ouverte {self.sid[:10]} -> {chemin}", flush=True)
 		self.tache = asyncio.create_task(self._boucle(stream), name=f"piste-{self.sid}")
 
@@ -130,8 +130,8 @@ async def main():
 	hpb = HPBSettings(server=os.environ["CEFFIO_HPB_URL"], stunservers=[], turnservers=[])
 	client = SpreedClient(room, hpb, "en", None)
 
-	# L'app de transcription quitte l'appel sans récepteur ; une capture doit
-	# rester tant que l'appel vit (la fin d'appel ferme toujours le client).
+	# The transcription app leaves a call with no receiver; a capture must stay
+	# as long as the call lives (the end of the call always closes the client).
 	async def rester():
 		while True:
 			await asyncio.sleep(3600)

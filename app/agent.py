@@ -1,13 +1,13 @@
 """Agent du service de capture.
 
-Boucle : surveille l'état d'enregistrement des salles Talk, lance la capture
-quand un enregistrement démarre, l'arrête avec lui, transcrit, puis dépose les
-fichiers à côté du .webm — dans les fichiers de celui qui a lancé
-l'enregistrement, puisque c'est là que Talk range le .webm.
+The loop: watches the recording state of every Talk room, joins a call when it
+starts, marks the recordings that begin, stops with the call, transcribes, and
+writes the .srt next to the .webm — in the files of the person who started the
+recording, since that is where Talk stores it.
 
-La lecture de l'état et le dépôt passent par l'API Kubernetes (exec dans les
-pods Nextcloud et PostgreSQL) : le service n'a besoin ni d'identifiant de base
-de données, ni d'accès au volume Nextcloud.
+State reading and deposit go through the Kubernetes API (exec in the Nextcloud
+and PostgreSQL pods): the service needs neither database credentials nor access
+to the Nextcloud volume.
 """
 import base64
 import glob
@@ -96,7 +96,7 @@ def rooms_in_call():
 
 
 def salons_enregistres():
-	"""[(jeton, état, langue)] des salles en cours d'enregistrement."""
+	"""[(token, state, language)] of the rooms currently recording."""
 	lignes = psql("select token, call_recording, coalesce(transcription_language,'') from oc_talk_rooms where call_recording <> 0")
 	resultat = []
 	for ligne in lignes.splitlines():
@@ -303,5 +303,5 @@ class Sante(BaseHTTPRequestHandler):
 if __name__ == "__main__":
 	os.makedirs(PISTES, exist_ok=True)
 	threading.Thread(target=boucle, daemon=True).start()
-	print("agent de capture démarré", flush=True)
+	print("capture agent started", flush=True)
 	HTTPServer(("", 8080), Sante).serve_forever()

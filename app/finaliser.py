@@ -57,35 +57,26 @@ def speech_chunks(audio, rate=16000):
 
 
 def transcribe(audio, room_language, model, rate=16000):
-	"""Transcribe one track, deciding the language PER SPEECH CHUNK.
+	"""Transcribe one track as a WHOLE, in the room language.
 
-	ONE DECISION PER TRACK WAS WRONG, and it was observed: a participant who
-	speaks French and ends with one Arabic sentence had the whole track forced
-	through the Arabic model, because detection saw 0.66 for Arabic and the
-	French majority was lost.
+	WHY NOT PER SPEECH CHUNK ANY MORE, although it fixed a real case: cutting
+	the track into short regions and transcribing each one without context
+	made whisper invent text on noise. On a live recording the transcript came
+	back as "Merci d'avoir regardé" four times and "Voir une bombe" where the
+	same audio, transcribed as a whole, read "C'est un peu bizarre comme truc.
+	On va voir si ça marche ou ça marche pas." Short inputs hallucinate.
 
-	Each chunk is detected on its own; the room language is the tie-breaker
-	when the detection is not confident.
+	The room language is the reference — the moderator declared it, and the
+	first version that overrode it per track turned a French speaker who ended
+	in Arabic into an all-Arabic transcript. When the room has no language,
+	whisper detects it once for the track.
 	"""
-	lines = []
-	for start, end in speech_chunks(audio, rate):
-		chunk = audio[start:end]
-		if len(chunk) < rate // 2:
-			continue
-		segments, info = model.transcribe(chunk, language=None, beam_size=5, vad_filter=False)
-		language = info.language
-		if info.language_probability < 0.6 and room_language:
-			language = room_language
-			segments, info = model.transcribe(chunk, language=language, beam_size=5, vad_filter=False)
-		for s in segments:
-			text = s.text.strip()
-			if text:
-				lines.append({
-					"start": start / rate + float(s.start),
-					"end": start / rate + float(s.end),
-					"text": text,
-				})
-	return lines
+	segments, info = model.transcribe(audio, language=room_language or None,
+		beam_size=5, vad_filter=True)
+	language = room_language or info.language
+	print("language %s (%.2f)" % (language, info.language_probability), flush=True)
+	return [{"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
+		for s in segments if s.text.strip()]
 
 
 def timestamp(t):

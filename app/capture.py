@@ -43,7 +43,19 @@ class PisteOpus:
 		self.conteneur = None
 		self.piste = None
 		self.tache = None
-		self.ouvert = time.time()
+		# THE ANCHOR IS THE FIRST SAMPLE, NOT THE TRACK OPENING.
+		#
+		# The track object exists as soon as the offer is accepted, but the
+		# first audio sample only arrives once ICE and DTLS are done — seconds
+		# later, and a different number of seconds for each participant. Dating
+		# the track at its opening made every transcript start too early by
+		# exactly that delay, which is why the first twenty seconds of a live
+		# recording went missing and the rest drifted.
+		#
+		# All pods on a node share the kernel clock, so this timestamp and the
+		# recorder's file name are on the same time base: no drift to correct,
+		# only the real delay to measure.
+		self.ouvert = None
 		self.resampler = av.AudioResampler(format="s16", layout="mono", rate=48000)
 
 	async def connect(self):
@@ -56,8 +68,15 @@ class PisteOpus:
 		self.piste.layout = "mono"
 		self.piste.bit_rate = 32000
 
-		# L'instant d'ouverture de la piste : l'abonnement WebRTC n'arrive pas
-		# au début de l'enregistrement, et le délai varie par participant.
+		# L'instant d'ouverture n'est PAS écrit ici : la piste n'a pas encore
+		# d'audio. Voir _dater() dans la boucle de réception.
+		print(f"piste ouverte {self.sid[:10]} -> {chemin}", flush=True)
+		self.tache = asyncio.create_task(self._boucle(stream), name=f"piste-{self.sid}")
+
+	def _dater(self, frame):
+		"""Stamp the track with the arrival of its FIRST sample."""
+		duree = float(getattr(frame, "samples", 0)) / float(getattr(frame, "sample_rate", 48000) or 48000)
+		self.ouvert = time.time() - duree
 		journal = os.path.join(SORTIE, "pistes.json")
 		existantes = {}
 		if os.path.exists(journal):
@@ -68,13 +87,13 @@ class PisteOpus:
 		existantes[self.sid] = self.ouvert
 		with open(journal, "w") as f:
 			json.dump(existantes, f)
-		print(f"piste ouverte {self.sid[:10]} -> {chemin}", flush=True)
-		self.tache = asyncio.create_task(self._boucle(stream), name=f"piste-{self.sid}")
 
 	async def _boucle(self, stream):
 		try:
 			while True:
 				frame = await stream.receive()
+				if self.ouvert is None:
+					self._dater(frame)
 				for sortie in self.resampler.resample(frame):
 					sortie.pts = None
 					for paquet in self.piste.encode(sortie):

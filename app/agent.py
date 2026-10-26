@@ -273,10 +273,17 @@ def boucle():
 					etat["recording"] = False
 					finaliser(jeton, etat)
 
-			# The call ended: stop capturing.
+			# The call ended: stop capturing. A recording can still be PENDING
+			# here — Talk clears call_recording only once the recorder has
+			# uploaded its .webm, which can be seconds after the last person
+			# hangs up. Cleaning up before that deleted the tracks of a
+			# recording that had not been transcribed yet (observed: an empty
+			# .pistes folder and no .srt at all).
 			for jeton in list(_captures):
 				if jeton not in in_call:
-					arreter(jeton)
+					etat = arreter(jeton)
+					if etat and etat.get("recording"):
+						finaliser(jeton, etat)
 					nettoyer()
 		except Exception as e:
 			print(f"loop: {e!r}", flush=True)

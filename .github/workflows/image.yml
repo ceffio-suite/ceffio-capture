@@ -11,7 +11,19 @@ permissions:
   packages: write
 
 jobs:
+  tests:
+    # THE TESTS RUN BEFORE THE IMAGE, and they need NOTHING from it: the
+    # notification logic and the endpoint are tested with the standard library
+    # alone, with the Kubernetes client stubbed. A one-minute job is a cheap
+    # guard for the code a forged notification would reach first.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
+
   build:
+    needs: tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

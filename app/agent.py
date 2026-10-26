@@ -1,16 +1,21 @@
 """Agent du service de capture.
 
-The loop: watches the recording state of every Talk room, joins a call when it
-starts, marks the recordings that begin, stops with the call, transcribes, and
-writes the .srt next to the .webm — in the files of the person who started the
-recording, since that is where Talk stores it.
+START AND STOP ARRIVE FROM THE RELAY, and from nothing else. The recorder's pod
+carries a relay in front of it; when the recorder has accepted a start or a stop,
+the relay posts it here, signed. This service no longer reads the database — no
+one-second poll on oc_talk_rooms, no psql, no credential on the data namespace —
+and the only thing it still asks the cluster for is the deposit of the finished
+transcript, through the Nextcloud pod.
 
-State reading and deposit go through the Kubernetes API (exec in the Nextcloud
-and PostgreSQL pods): the service needs neither database credentials nor access
-to the Nextcloud volume.
+The language of the room is NOT in the notification: see demarrer() for what
+that costs and why it is accepted.
+
+Deposit goes through the Kubernetes API (exec in the Nextcloud pod): the service
+needs neither database credentials nor access to the Nextcloud volume.
 """
 import base64
 import glob
+import queue
 import shutil
 import json
 import os
@@ -21,10 +26,26 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from kubernetes import client, config, stream
 
+import notification
+
 NS_FILES = os.environ.get("CEFFIO_NC_NAMESPACE", "ceffio-files")
-NS_DATA = os.environ.get("CEFFIO_DB_NAMESPACE", "ceffio-data")
 NS_VIDEO = os.environ.get("CEFFIO_NAMESPACE", "ceffio-video")
 TRAVAIL = os.environ.get("CEFFIO_WORK", "/work")
+
+# THE RELAY'S SECRET, COPIED INTO THIS MODULE'S OWN VAULT ENTRY: the pod holds
+# no right on the recording server's entry, exactly as it holds none on the
+# signaling's. Empty means the endpoint refuses everything — a capture that
+# accepts an unsigned start would let any pod in the namespace open a
+# transcription.
+SECRET_RELAIS = os.environ.get("CEFFIO_RELAY_SECRET", "")
+
+# A CAPTURE THAT NEVER RECEIVES ITS STOP MUST NOT FILL THE DISK. The relay
+# always sends one, but a pod restarted mid-recording, or a relay that died,
+# would otherwise leave a client writing audio until the volume is full.
+DUREE_MAX = float(os.environ.get("CEFFIO_MAX_HOURS", "6")) * 3600
+
+_FILE = queue.Queue()
+_etat = notification.Etat()
 
 
 def dossier(jeton):
@@ -44,8 +65,13 @@ def pistes(jeton):
 def marqueur(jeton):
 	"""Present only while that room is being recorded."""
 	return os.path.join(dossier(jeton), "recording")
+# THE LANGUAGE IS NO LONGER THE ROOM'S: see demarrer(). CEFFIO_LANGUE, when
+# set, is the installation's default; empty means whisper detects it per track.
 LANGUE_DEFAUT = os.environ.get("CEFFIO_LANGUE", "")
-INTERVALLE = float(os.environ.get("CEFFIO_INTERVALLE", "1"))
+
+# WHAT THE LAST NOTIFICATION ASKED FOR, on /status: without it, an operator
+# seeing "no capture" cannot tell a quiet installation from a refused start.
+_derniere_notification = {"type": None, "token": None, "at": None, "outcome": None}
 
 _api = None
 
@@ -107,36 +133,6 @@ def executer(namespace, pod, commande, entree=None, conteneur=None):
 	return sortie
 
 
-def psql(requete):
-	pod = pod_de(NS_DATA, "cnpg.io/cluster=ceffio-pg,cnpg.io/instanceRole=primary")
-	return executer(NS_DATA, pod, ["psql", "-U", "postgres", "-d", "nextcloud", "-At", "-F", "|", "-c", requete])
-
-
-def rooms_in_call():
-	"""Rooms where a call is running — the capture must join BEFORE recording.
-
-	WHY: the recording starts first, and the WebRTC subscription takes tens of
-	seconds to establish (ICE, then the offer per publisher). Starting the
-	capture on the recording left the first 20 seconds of a live test missing.
-	A call always starts before anyone records, so that is when we join.
-	"""
-	lines = psql("select distinct r.token from oc_talk_sessions s "
-		"join oc_talk_attendees a on a.id = s.attendee_id "
-		"join oc_talk_rooms r on r.id = a.room_id where s.in_call > 0")
-	return [l.strip() for l in lines.splitlines() if l.strip()]
-
-
-def salons_enregistres():
-	"""[(token, state, language)] of the rooms currently recording."""
-	lignes = psql("select token, call_recording, coalesce(transcription_language,'') from oc_talk_rooms where call_recording <> 0")
-	resultat = []
-	for ligne in lignes.splitlines():
-		parts = ligne.split("|")
-		if len(parts) == 3 and parts[0]:
-			resultat.append((parts[0], int(parts[1]), parts[2]))
-	return resultat
-
-
 def webm_de_la_salle(jeton):
 	pod = pod_de(NS_FILES, "app=nextcloud")
 	# splitlines(), NOT split(): a recording path contains spaces
@@ -146,21 +142,36 @@ def webm_de_la_salle(jeton):
 		f"ls -1 /var/www/html/data/*/files/Talk/Recording/{jeton}/*.webm 2>/dev/null"]).splitlines() if ligne.strip()]
 
 
-def demarrer(jeton, langue):
-	# THE CLIENT SUBSCRIBES, BUT WRITES NOTHING until the marker exists: a
-	# capture that records every call fills the disk with meetings nobody asked
-	# to transcribe, and the marker is what "this room is being recorded" means.
+def demarrer(jeton):
+	"""Open one capture for a room the relay has just seen start recording.
+
+	THE LANGUAGE OF THE ROOM IS NO LONGER KNOWABLE HERE, and that is the price
+	of dropping the database. It used to be read from oc_talk_rooms; the relay's
+	notification does not carry it, and the signaling does not put it in the
+	join reply that the vendored client reads. So this keeps what the plan
+	allows: whisper detects the language per track, and CEFFIO_LANGUE, when set,
+	overrides it for the whole installation. The consequence is documented in
+	docs/plan-capture.md: a French call that ends with one Arabic sentence can
+	come back wholly in Arabic.
+	"""
 	os.makedirs(pistes(jeton), exist_ok=True)
+	# THE MARKER COMES BEFORE THE CLIENT: the client subscribes and discards
+	# until it exists, so a capture that fails to start leaves no audio behind.
+	open(marqueur(jeton), "w").close()
 	try:
-		os.remove(marqueur(jeton))
-	except FileNotFoundError:
-		pass
+		avant = set(webm_de_la_salle(jeton))
+	except Exception as e:
+		# WITHOUT THE SNAPSHOT the finaliser could mistake the room's PREVIOUS
+		# .webm for this recording's. Starting anyway is the lesser evil: the
+		# audio is irreplaceable, and the error is said out loud.
+		avant = set()
+		print(f"webm snapshot failed for {jeton}: {e!r}", flush=True)
 	environnement = dict(os.environ, CEFFIO_ROOM=jeton, CEFFIO_WORK=dossier(jeton))
 	log = open(os.path.join(dossier(jeton), "capture.log"), "w")
 	proc = subprocess.Popen(["python3", "/app/capture.py"], env=environnement, stdout=log, stderr=subprocess.STDOUT)
-	_captures[jeton] = {"proc": proc, "debut": time.time(), "webm_avant": None,
-		"langue": langue, "recording": False}
-	print(f"capture started for {jeton} (language {langue or 'auto'})", flush=True)
+	_captures[jeton] = {"proc": proc, "debut": time.time(), "webm_avant": avant,
+		"langue": LANGUE_DEFAUT, "recording": True}
+	print(f"capture started for {jeton} (language {LANGUE_DEFAUT or 'auto'})", flush=True)
 
 
 def nettoyer(jeton):
@@ -184,6 +195,13 @@ def arreter(jeton):
 	etat = _captures.pop(jeton, None)
 	if not etat:
 		return
+	# THE MARKER GOES FIRST: it is what tells the client to keep writing, so
+	# removing it before the process is stopped avoids a last track opened
+	# between the two.
+	try:
+		os.remove(marqueur(jeton))
+	except FileNotFoundError:
+		pass
 	etat["proc"].terminate()
 	try:
 		etat["proc"].wait(timeout=15)
@@ -296,61 +314,96 @@ def finaliser(jeton, etat):
 	except Exception as e:
 		_dernier.update({"result": "failed", "error": repr(e), "ended": time.time()})
 		print("finalisation failed: %r" % e, flush=True)
-def boucle():
+def servir_un(avis):
+	"""Carry out ONE notification. Called by the worker, never by the request.
+
+	THE JUDGMENT IS notification.Etat's, the effects are here: the endpoint must
+	answer in milliseconds, and a transcription takes minutes.
+	"""
+	jeton = avis["token"]
+	_derniere_notification.update({"type": avis["type"], "token": jeton,
+		"at": avis.get("at"), "outcome": None})
+
+	if avis["type"] == "start":
+		commence, doublon = _etat.commence(jeton)
+		if doublon:
+			print(f"start ignored for {jeton}: already recording", flush=True)
+			_derniere_notification["outcome"] = "start ignored: already recording"
+			return
+		demarrer(jeton)
+		_derniere_notification["outcome"] = "capture started"
+		return
+
+	if not _etat.termine(jeton):
+		# THE PLAN'S RULE, and it protects the previous recording's files: a
+		# stop with no capture would finalise whatever the work directory still
+		# holds.
+		print(f"stop ignored for {jeton}: no recording in progress", flush=True)
+		_derniere_notification["outcome"] = "stop ignored: no recording in progress"
+		return
+	etat = arreter(jeton)
+	_derniere_notification["outcome"] = "capture stopped, transcription under way"
+	if etat:
+		finaliser(jeton, etat)
+	nettoyer(jeton)
+
+
+def surveiller():
+	"""Stop a capture that never received its stop.
+
+	The relay always sends one; a capture left running by a crash, a lost
+	notification or a relay killed mid-recording would write audio until the
+	volume fills. Six hours is longer than any meeting this appliance is for.
+	"""
+	for jeton, etat in list(_captures.items()):
+		if time.time() - etat["debut"] <= DUREE_MAX:
+			continue
+		print(f"capture for {jeton} exceeded {DUREE_MAX / 3600:.0f} h: stopping it", flush=True)
+		if _etat.termine(jeton):
+			arret = arreter(jeton)
+			if arret:
+				finaliser(jeton, arret)
+			nettoyer(jeton)
+
+
+def servir():
+	"""The single worker: notifications are carried out IN ORDER.
+
+	WHY ONE WORKER AND NOT A THREAD PER NOTIFICATION: two captures in the same
+	room would fight over the same work directory, and the deposit assumes one
+	finalisation at a time. The polling loop had the same property; the queue
+	replaces the poll, and the order is now the relay's.
+	"""
 	while True:
 		try:
-			in_call = set(rooms_in_call())
-			recording = {jeton: langue for jeton, _, langue in salons_enregistres()}
-
-			# A new call: join it now, so the subscription is ready before
-			# anyone presses record.
-			for jeton in in_call:
-				if jeton not in _captures:
-					demarrer(jeton, recording.get(jeton, ""))
-
-			# A recording just started in a room we already joined: remember
-			# the recordings that existed, so the new .webm can be identified.
-			for jeton in recording:
-				etat = _captures.get(jeton)
-				if etat and not etat["recording"]:
-					etat["recording"] = True
-					open(marqueur(jeton), "w").close()
-					etat["webm_avant"] = set(webm_de_la_salle(jeton))
-					etat["langue"] = recording[jeton] or etat.get("langue", "")
-					print("recording started in %s" % jeton, flush=True)
-
-			# A recording stopped: finalise, but keep capturing while the call
-			# goes on (a second recording would reuse the same tracks).
-			for jeton, etat in list(_captures.items()):
-				if etat["recording"] and jeton not in recording:
-					etat["recording"] = False
-					try:
-						os.remove(marqueur(jeton))
-					except FileNotFoundError:
-						pass
-					finaliser(jeton, etat)
-
-			# The call ended: stop capturing. A recording can still be PENDING
-			# here — Talk clears call_recording only once the recorder has
-			# uploaded its .webm, which can be seconds after the last person
-			# hangs up. Cleaning up before that deleted the tracks of a
-			# recording that had not been transcribed yet (observed: an empty
-			# .pistes folder and no .srt at all).
-			for jeton in list(_captures):
-				if jeton not in in_call:
-					etat = arreter(jeton)
-					if etat and etat.get("recording"):
-						finaliser(jeton, etat)
-					nettoyer(jeton)
+			avis = _FILE.get(timeout=60)
+		except queue.Empty:
+			avis = None
+		if avis is not None:
+			try:
+				servir_un(avis)
+			except Exception as e:
+				print(f"notification {avis.get('type')!r} failed: {e!r}", flush=True)
+			finally:
+				_FILE.task_done()
+		try:
+			surveiller()
 		except Exception as e:
-			print(f"loop: {e!r}", flush=True)
-		time.sleep(INTERVALLE)
+			print(f"watchdog: {e!r}", flush=True)
 
 
 class Sante(BaseHTTPRequestHandler):
+	def _repond(self, code, corps):
+		self.send_response(code)
+		self.send_header("Content-Type", "text/plain; charset=utf-8")
+		self.send_header("Content-Length", str(len(corps)))
+		self.end_headers()
+		self.wfile.write(corps)
+
 	def do_GET(self):
 		if self.path == "/status":
-			corps = json.dumps({**_dernier, **_modele}).encode()
+			corps = json.dumps({**_dernier, **_modele,
+				"last_notification": _derniere_notification}).encode()
 			self.send_response(200)
 			self.send_header("Content-Type", "application/json")
 			self.send_header("Content-Length", str(len(corps)))
@@ -360,6 +413,52 @@ class Sante(BaseHTTPRequestHandler):
 		self.send_response(200 if self.path == "/healthz" else 404)
 		self.end_headers()
 		self.wfile.write(b"ok")
+
+	def do_POST(self):
+		"""POST /v1/recording — the relay's notification, and the only entry.
+
+		THE ORDER IS SIGNATURE FIRST, PARSING SECOND: acting on a body before it
+		is proven to come from the relay would let any pod in the namespace open
+		a transcription, or end one.
+		"""
+		if self.path != "/v1/recording":
+			self._repond(404, b"not found")
+			return
+		if not SECRET_RELAIS:
+			# FAIL CLOSED, AND SAY SO: an installation whose secret was not
+			# copied would otherwise accept a signature anyone can compute with
+			# an empty key.
+			self._repond(503, b"no relay secret configured")
+			return
+		try:
+			longueur = int(self.headers.get("Content-Length") or 0)
+		except ValueError:
+			longueur = 0
+		if longueur <= 0:
+			self._repond(400, b"no body")
+			return
+		if longueur > notification.MAX_BODY:
+			self._repond(413, b"body too large")
+			return
+
+		corps = self.rfile.read(longueur)
+		if not notification.verifie(SECRET_RELAIS,
+				self.headers.get("Ceffio-Relay-Random", ""),
+				self.headers.get("Ceffio-Relay-Checksum", ""), corps):
+			print("notification refused: bad signature", flush=True)
+			self._repond(403, b"bad signature")
+			return
+		try:
+			avis = notification.lire(corps)
+		except notification.Refus as refus:
+			self._repond(refus.code, str(refus).encode())
+			return
+
+		# 202, NOT 200: the work is queued, not done. The relay gives us two
+		# seconds and does not retry, so nothing here may wait for a capture to
+		# open or a transcription to finish.
+		_FILE.put(avis)
+		self._repond(202, b"accepted")
 
 	def log_message(self, *args):
 		pass
@@ -379,7 +478,9 @@ def verifier_modele():
 
 if __name__ == "__main__":
 	os.makedirs(os.path.join(TRAVAIL, "salons"), exist_ok=True)
+	if not SECRET_RELAIS:
+		print("ATTENTION: CEFFIO_RELAY_SECRET is empty — every notification will be refused", flush=True)
 	threading.Thread(target=verifier_modele, daemon=True).start()
-	threading.Thread(target=boucle, daemon=True).start()
-	print("capture agent started", flush=True)
+	threading.Thread(target=servir, daemon=True).start()
+	print("capture agent started: start and stop come from the relay, no database", flush=True)
 	HTTPServer(("", 8080), Sante).serve_forever()

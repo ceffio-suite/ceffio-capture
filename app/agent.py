@@ -210,7 +210,8 @@ def finaliser(jeton, etat):
 	with open(os.path.join(PISTES, "noms.json"), "w") as f:
 		json.dump(noms(jeton, sessions), f)
 
-	environnement = dict(os.environ, CEFFIO_LANGUE=etat.get("langue", ""))
+	environnement = dict(os.environ, CEFFIO_LANGUE=etat.get("langue", ""),
+		CEFFIO_MIX=os.path.join(TRAVAIL, "webm.webm"))
 	subprocess.run(["python3", "/app/finaliser.py", PISTES, os.path.join(TRAVAIL, "transcription.srt"), str(debut_webm)],
 		env=environnement, check=False)
 	deposer(jeton, etat, webm)

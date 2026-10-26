@@ -150,7 +150,9 @@ def main():
 		names = json.load(open(path))
 
 	mix = None
-	chemin_mix = os.path.join(folder, "webm.webm")
+	# CEFFIO_MIX is set by the agent, which fetches the recording next to the
+	# tracks; the fallback keeps the script usable by hand.
+	chemin_mix = os.environ.get("CEFFIO_MIX") or os.path.join(folder, "webm.webm")
 	if os.path.exists(chemin_mix):
 		mix = pcm(chemin_mix)
 

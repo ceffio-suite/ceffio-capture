@@ -1,7 +1,15 @@
 # This service captures audio PER PARTICIPANT during a Talk recording, then
 # transcribes each track on the CPU. It is separate from the Ceffio binary
 # because the stack is Python (WebRTC, whisper) while the binary is static.
-FROM python:3.12-slim
+#
+# THE BASE IMAGE IS PINNED BY DIGEST, like every image of the suite (see
+# internal/version in the Ceffio repository). "python:3.12-slim" moves: a
+# rebuild months apart would ship a different interpreter and a different
+# Debian snapshot, with no commit saying so — which is exactly what a
+# reproducible appliance cannot afford. The digest below is the
+# MULTI-ARCHITECTURE INDEX, so the build keeps resolving linux/amd64 by
+# platform instead of being frozen to one architecture.
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
 
 # ffmpeg: muxing subtitles into the .webm (stream copy, no re-encode).
 RUN apt-get update \

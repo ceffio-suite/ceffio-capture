@@ -107,8 +107,17 @@ def main():
 
 	from faster_whisper import WhisperModel
 
-	model = WhisperModel(MODEL, device="cpu", compute_type="int8",
-		cpu_threads=THREADS, download_root=MODELS)
+	# A MISSING MODEL MUST NOT COST THE TRANSCRIPTION: falling back to small
+	# keeps the text, and the fallback is reported instead of hidden. The plan
+	# refuses medium at save time; doing it here, at the moment it matters,
+	# needs no network probe.
+	try:
+		model = WhisperModel(MODEL, device="cpu", compute_type="int8",
+			cpu_threads=THREADS, download_root=MODELS)
+	except Exception as e:
+		print(json.dumps({"model_fallback": MODEL, "error": repr(e)}), flush=True)
+		model = WhisperModel("small", device="cpu", compute_type="int8",
+			cpu_threads=THREADS, download_root=MODELS)
 
 	lines = []
 	for track in sorted(glob.glob(os.path.join(folder, "*.opus"))):

@@ -11,6 +11,7 @@ to the Nextcloud volume.
 """
 import base64
 import glob
+import shutil
 import json
 import os
 import subprocess
@@ -24,7 +25,25 @@ NS_FILES = os.environ.get("CEFFIO_NC_NAMESPACE", "ceffio-files")
 NS_DATA = os.environ.get("CEFFIO_DB_NAMESPACE", "ceffio-data")
 NS_VIDEO = os.environ.get("CEFFIO_NAMESPACE", "ceffio-video")
 TRAVAIL = os.environ.get("CEFFIO_WORK", "/work")
-PISTES = os.path.join(TRAVAIL, "pistes")
+
+
+def dossier(jeton):
+	"""One work directory PER ROOM.
+
+	A single shared directory mixed two simultaneous meetings: the words of B
+	ended up in the transcript deposited for A's owner, and finishing A deleted
+	B's tracks. Nothing outside the room's own folder is touched now.
+	"""
+	return os.path.join(TRAVAIL, "salons", jeton)
+
+
+def pistes(jeton):
+	return os.path.join(dossier(jeton), "pistes")
+
+
+def marqueur(jeton):
+	"""Present only while that room is being recorded."""
+	return os.path.join(dossier(jeton), "recording")
 LANGUE_DEFAUT = os.environ.get("CEFFIO_LANGUE", "")
 INTERVALLE = float(os.environ.get("CEFFIO_INTERVALLE", "1"))
 
@@ -36,6 +55,11 @@ _api = None
 # only what an operator needs to see that it ran.
 _dernier = {"room": None, "owner": None, "started": None, "ended": None,
 	"result": "none", "error": None, "seconds": None}
+
+# THE MODEL IS LOADED AT STARTUP, before any meeting: an operator must learn
+# that the chosen model is unusable when they look at the module state, not
+# when a meeting has already been recorded.
+_modele = {"model_ready": None, "model_effective": None, "model_error": None}
 _captures = {}   # token -> {"proc": Popen, "debut": epoch, "webm_avant": set, "langue": str}
 
 
@@ -123,27 +147,37 @@ def webm_de_la_salle(jeton):
 
 
 def demarrer(jeton, langue):
-	os.makedirs(PISTES, exist_ok=True)
-	environnement = dict(os.environ, CEFFIO_ROOM=jeton, CEFFIO_WORK=TRAVAIL)
-	log = open(os.path.join(TRAVAIL, f"capture-{jeton}.log"), "w")
+	# THE CLIENT SUBSCRIBES, BUT WRITES NOTHING until the marker exists: a
+	# capture that records every call fills the disk with meetings nobody asked
+	# to transcribe, and the marker is what "this room is being recorded" means.
+	os.makedirs(pistes(jeton), exist_ok=True)
+	try:
+		os.remove(marqueur(jeton))
+	except FileNotFoundError:
+		pass
+	environnement = dict(os.environ, CEFFIO_ROOM=jeton, CEFFIO_WORK=dossier(jeton))
+	log = open(os.path.join(dossier(jeton), "capture.log"), "w")
 	proc = subprocess.Popen(["python3", "/app/capture.py"], env=environnement, stdout=log, stderr=subprocess.STDOUT)
 	_captures[jeton] = {"proc": proc, "debut": time.time(), "webm_avant": None,
 		"langue": langue, "recording": False}
 	print(f"capture started for {jeton} (language {langue or 'auto'})", flush=True)
 
 
-def nettoyer():
-	"""Drop the working files once the call is over."""
-	for reste in glob.glob(os.path.join(PISTES, "*.opus")) + glob.glob(os.path.join(PISTES, "*.json")):
-		try:
-			os.remove(reste)
-		except FileNotFoundError:
-			pass
-	for reste in ("transcription.srt", "webm.webm"):
-		try:
-			os.remove(os.path.join(TRAVAIL, reste))
-		except FileNotFoundError:
-			pass
+def nettoyer(jeton):
+	"""Drop ONE room's working files — and never a failed transcription.
+
+	A failed transcription that also deletes its tracks is a transcription lost
+	for good: the audio existed once. The folder of a failed job is kept
+	(CEFFIO_KEEP_FAILED_HOURS, 24 h by default) so it can be retried.
+	"""
+	base = dossier(jeton)
+	dernier = _dernier.get("room") == jeton and _dernier.get("result") == "failed"
+	if dernier:
+		age = time.time() - os.path.getmtime(base) if os.path.exists(base) else 0
+		if age < float(os.environ.get("CEFFIO_KEEP_FAILED_HOURS", "24")) * 3600:
+			print("keeping %s: its transcription failed" % base, flush=True)
+			return
+	shutil.rmtree(base, ignore_errors=True)
 
 
 def arreter(jeton):
@@ -188,7 +222,7 @@ def noms(jeton, sessions):
 	wrong identifier returned nothing and the transcript fell back to
 	"participant abcdef". The roster carries both, and the user id with them.
 	"""
-	chemin = os.path.join(PISTES, "participants.json")
+	chemin = os.path.join(pistes(jeton), "participants.json")
 	if not os.path.exists(chemin):
 		return {}
 	roster = json.load(open(chemin))
@@ -209,7 +243,7 @@ def deposer(jeton, etat, chemin_webm):
 	"""
 	base = chemin_webm[:-len(".webm")]
 	pod = pod_de(NS_FILES, "app=nextcloud")
-	srt = os.path.join(TRAVAIL, "transcription.srt")
+	srt = os.path.join(dossier(jeton), "transcription.srt")
 	with open(srt, "rb") as f:
 		donnees = base64.b64encode(f.read()).decode("ascii")
 
@@ -237,22 +271,22 @@ def finaliser(jeton, etat):
 	pod = pod_de(NS_FILES, "app=nextcloud")
 	try:
 		encode = executer(NS_FILES, pod, ["sh", "-c", "base64 -w0 '%s'" % webm])
-		with open(os.path.join(TRAVAIL, "webm.webm"), "wb") as f:
+		with open(os.path.join(dossier(jeton), "webm.webm"), "wb") as f:
 			f.write(base64.b64decode(encode))
 	except Exception as e:
 		print("mix not fetched (%r): alignment falls back to timestamps" % e, flush=True)
 
-	sessions = [os.path.basename(p)[:-len(".opus")] for p in os.listdir(PISTES) if p.endswith(".opus")]
-	with open(os.path.join(PISTES, "noms.json"), "w") as f:
+	sessions = [os.path.basename(p)[:-len(".opus")] for p in os.listdir(pistes(jeton)) if p.endswith(".opus")]
+	with open(os.path.join(pistes(jeton), "noms.json"), "w") as f:
 		json.dump(noms(jeton, sessions), f)
 
 	environnement = dict(os.environ, CEFFIO_LANGUE=etat.get("langue", ""),
-		CEFFIO_MIX=os.path.join(TRAVAIL, "webm.webm"))
+		CEFFIO_MIX=os.path.join(dossier(jeton), "webm.webm"))
 	debut = time.time()
 	_dernier.update({"room": jeton, "started": debut, "result": "running", "error": None})
 	try:
-		copie = subprocess.run(["python3", "/app/finaliser.py", PISTES,
-			os.path.join(TRAVAIL, "transcription.srt"), str(debut_webm)],
+		copie = subprocess.run(["python3", "/app/finaliser.py", pistes(jeton),
+			os.path.join(dossier(jeton), "transcription.srt"), str(debut_webm)],
 			env=environnement, check=False)
 		if copie.returncode != 0:
 			raise RuntimeError("transcription exited with %d" % copie.returncode)
@@ -280,6 +314,7 @@ def boucle():
 				etat = _captures.get(jeton)
 				if etat and not etat["recording"]:
 					etat["recording"] = True
+					open(marqueur(jeton), "w").close()
 					etat["webm_avant"] = set(webm_de_la_salle(jeton))
 					etat["langue"] = recording[jeton] or etat.get("langue", "")
 					print("recording started in %s" % jeton, flush=True)
@@ -289,6 +324,10 @@ def boucle():
 			for jeton, etat in list(_captures.items()):
 				if etat["recording"] and jeton not in recording:
 					etat["recording"] = False
+					try:
+						os.remove(marqueur(jeton))
+					except FileNotFoundError:
+						pass
 					finaliser(jeton, etat)
 
 			# The call ended: stop capturing. A recording can still be PENDING
@@ -302,7 +341,7 @@ def boucle():
 					etat = arreter(jeton)
 					if etat and etat.get("recording"):
 						finaliser(jeton, etat)
-					nettoyer()
+					nettoyer(jeton)
 		except Exception as e:
 			print(f"loop: {e!r}", flush=True)
 		time.sleep(INTERVALLE)
@@ -311,7 +350,7 @@ def boucle():
 class Sante(BaseHTTPRequestHandler):
 	def do_GET(self):
 		if self.path == "/status":
-			corps = json.dumps(_dernier).encode()
+			corps = json.dumps({**_dernier, **_modele}).encode()
 			self.send_response(200)
 			self.send_header("Content-Type", "application/json")
 			self.send_header("Content-Length", str(len(corps)))
@@ -326,8 +365,21 @@ class Sante(BaseHTTPRequestHandler):
 		pass
 
 
+def verifier_modele():
+	"""Load the configured model once, and say whether it worked."""
+	modele = os.environ.get("CEFFIO_MODEL", "small")
+	try:
+		from faster_whisper import WhisperModel
+		WhisperModel(modele, device="cpu", compute_type="int8",
+			cpu_threads=1, download_root=os.environ.get("CEFFIO_MODELS", "/models"))
+		_modele.update({"model_ready": True, "model_effective": modele})
+	except Exception as e:
+		_modele.update({"model_ready": False, "model_effective": "small", "model_error": repr(e)})
+
+
 if __name__ == "__main__":
-	os.makedirs(PISTES, exist_ok=True)
+	os.makedirs(os.path.join(TRAVAIL, "salons"), exist_ok=True)
+	threading.Thread(target=verifier_modele, daemon=True).start()
 	threading.Thread(target=boucle, daemon=True).start()
 	print("capture agent started", flush=True)
 	HTTPServer(("", 8080), Sante).serve_forever()

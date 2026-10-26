@@ -28,6 +28,13 @@ from spreed_client import SpreedClient  # noqa: E402
 TRAVAIL = os.environ.get("CEFFIO_WORK", "/work")
 SORTIE = os.path.join(TRAVAIL, "pistes")
 
+# WRITE NOTHING UNTIL THE RECORDING STARTS. The client joins the call as soon
+# as it begins — that is what gives it time to subscribe before anyone presses
+# record — but a meeting nobody records must not leave audio on disk. The agent
+# creates this marker when the recording starts, and the track opens on the
+# first frame seen after it appears.
+MARQUEUR = os.path.join(TRAVAIL, "recording")
+
 
 class PisteOpus:
 	"""Stand-in for the app's transcriber: encodes each track to Opus.
@@ -61,20 +68,21 @@ class PisteOpus:
 	async def connect(self):
 		return None
 
-	async def start(self, stream):
+	def _ouvrir(self):
 		chemin = os.path.join(SORTIE, f"{self.sid}.opus")
 		self.conteneur = av.open(chemin, "w", format="ogg")
 		self.piste = self.conteneur.add_stream("libopus", rate=48000)
 		self.piste.layout = "mono"
 		self.piste.bit_rate = 32000
+		return chemin
 
-		# The opening time is NOT written here: the track has no audio yet.
-		# See _dater() in the receive loop.
-		print(f"piste ouverte {self.sid[:10]} -> {chemin}", flush=True)
+	async def start(self, stream):
+		# The container is opened on the first frame seen AFTER the recording
+		# marker appears; until then the client is subscribed and discards.
 		self.tache = asyncio.create_task(self._boucle(stream), name=f"piste-{self.sid}")
 
 	def _dater(self, frame):
-		"""Stamp the track with the arrival of its FIRST sample."""
+		"""Stamp the track with the arrival of its FIRST written sample."""
 		duree = float(getattr(frame, "samples", 0)) / float(getattr(frame, "sample_rate", 48000) or 48000)
 		self.ouvert = time.time() - duree
 		journal = os.path.join(SORTIE, "pistes.json")
@@ -92,8 +100,12 @@ class PisteOpus:
 		try:
 			while True:
 				frame = await stream.receive()
-				if self.ouvert is None:
+				if self.conteneur is None:
+					if not os.path.exists(MARQUEUR):
+						continue
+					chemin = self._ouvrir()
 					self._dater(frame)
+					print(f"piste ouverte {self.sid[:10]} -> {chemin}", flush=True)
 				for sortie in self.resampler.resample(frame):
 					sortie.pts = None
 					for paquet in self.piste.encode(sortie):

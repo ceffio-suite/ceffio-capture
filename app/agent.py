@@ -81,6 +81,20 @@ def psql(requete):
 	return executer(NS_DATA, pod, ["psql", "-U", "postgres", "-d", "nextcloud", "-At", "-F", "|", "-c", requete])
 
 
+def rooms_in_call():
+	"""Rooms where a call is running — the capture must join BEFORE recording.
+
+	WHY: the recording starts first, and the WebRTC subscription takes tens of
+	seconds to establish (ICE, then the offer per publisher). Starting the
+	capture on the recording left the first 20 seconds of a live test missing.
+	A call always starts before anyone records, so that is when we join.
+	"""
+	lines = psql("select distinct r.token from oc_talk_sessions s "
+		"join oc_talk_attendees a on a.id = s.attendee_id "
+		"join oc_talk_rooms r on r.id = a.room_id where s.in_call > 0")
+	return [l.strip() for l in lines.splitlines() if l.strip()]
+
+
 def salons_enregistres():
 	"""[(jeton, état, langue)] des salles en cours d'enregistrement."""
 	lignes = psql("select token, call_recording, coalesce(transcription_language,'') from oc_talk_rooms where call_recording <> 0")
@@ -106,8 +120,23 @@ def demarrer(jeton, langue):
 	environnement = dict(os.environ, CEFFIO_ROOM=jeton, CEFFIO_WORK=TRAVAIL)
 	log = open(os.path.join(TRAVAIL, f"capture-{jeton}.log"), "w")
 	proc = subprocess.Popen(["python3", "/app/capture.py"], env=environnement, stdout=log, stderr=subprocess.STDOUT)
-	_captures[jeton] = {"proc": proc, "debut": time.time(), "webm_avant": set(webm_de_la_salle(jeton)), "langue": langue}
+	_captures[jeton] = {"proc": proc, "debut": time.time(), "webm_avant": None,
+		"langue": langue, "recording": False}
 	print(f"capture started for {jeton} (language {langue or 'auto'})", flush=True)
+
+
+def nettoyer():
+	"""Drop the working files once the call is over."""
+	for reste in glob.glob(os.path.join(PISTES, "*.opus")) + glob.glob(os.path.join(PISTES, "*.json")):
+		try:
+			os.remove(reste)
+		except FileNotFoundError:
+			pass
+	for reste in ("transcription.srt", "webm.webm"):
+		try:
+			os.remove(os.path.join(TRAVAIL, reste))
+		except FileNotFoundError:
+			pass
 
 
 def arreter(jeton):
@@ -215,34 +244,40 @@ def finaliser(jeton, etat):
 	subprocess.run(["python3", "/app/finaliser.py", PISTES, os.path.join(TRAVAIL, "transcription.srt"), str(debut_webm)],
 		env=environnement, check=False)
 	deposer(jeton, etat, webm)
-	# WORKING FILES DO NOT SURVIVE THE DEPOSIT. The Opus tracks were the
-	# capture format and the .srt was written next to the recording; keeping
-	# them in the pod would only fill a volume nobody reads.
-	for reste in glob.glob(os.path.join(PISTES, "*.opus")):
-		os.remove(reste)
-	for reste in ("participants.json", "noms.json", "pistes.json"):
-		try:
-			os.remove(os.path.join(PISTES, reste))
-		except FileNotFoundError:
-			pass
-	for reste in ("transcription.srt", "webm.webm"):
-		try:
-			os.remove(os.path.join(TRAVAIL, reste))
-		except FileNotFoundError:
-			pass
-
-
 def boucle():
 	while True:
 		try:
-			actifs = {jeton: langue for jeton, _, langue in salons_enregistres()}
-			for jeton in list(_captures):
-				if jeton not in actifs:
-					etat = arreter(jeton)
-					finaliser(jeton, etat)
-			for jeton, langue in actifs.items():
+			in_call = set(rooms_in_call())
+			recording = {jeton: langue for jeton, _, langue in salons_enregistres()}
+
+			# A new call: join it now, so the subscription is ready before
+			# anyone presses record.
+			for jeton in in_call:
 				if jeton not in _captures:
-					demarrer(jeton, langue or LANGUE_DEFAUT)
+					demarrer(jeton, recording.get(jeton, ""))
+
+			# A recording just started in a room we already joined: remember
+			# the recordings that existed, so the new .webm can be identified.
+			for jeton in recording:
+				etat = _captures.get(jeton)
+				if etat and not etat["recording"]:
+					etat["recording"] = True
+					etat["webm_avant"] = set(webm_de_la_salle(jeton))
+					etat["langue"] = recording[jeton] or etat.get("langue", "")
+					print("recording started in %s" % jeton, flush=True)
+
+			# A recording stopped: finalise, but keep capturing while the call
+			# goes on (a second recording would reuse the same tracks).
+			for jeton, etat in list(_captures.items()):
+				if etat["recording"] and jeton not in recording:
+					etat["recording"] = False
+					finaliser(jeton, etat)
+
+			# The call ended: stop capturing.
+			for jeton in list(_captures):
+				if jeton not in in_call:
+					arreter(jeton)
+					nettoyer()
 		except Exception as e:
 			print(f"loop: {e!r}", flush=True)
 		time.sleep(INTERVALLE)

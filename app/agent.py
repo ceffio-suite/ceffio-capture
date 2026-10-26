@@ -29,6 +29,13 @@ LANGUE_DEFAUT = os.environ.get("CEFFIO_LANGUE", "")
 INTERVALLE = float(os.environ.get("CEFFIO_INTERVALLE", "1"))
 
 _api = None
+
+# THE LAST JOB, exposed on GET /status. A silent failure was listed as a HIGH
+# risk in the plan: the module cannot tell "working" from "failing" unless the
+# service says what happened last. Nothing of the transcript itself is exposed —
+# only what an operator needs to see that it ran.
+_dernier = {"room": None, "owner": None, "started": None, "ended": None,
+	"result": "none", "error": None, "seconds": None}
 _captures = {}   # token -> {"proc": Popen, "debut": epoch, "webm_avant": set, "langue": str}
 
 
@@ -241,9 +248,20 @@ def finaliser(jeton, etat):
 
 	environnement = dict(os.environ, CEFFIO_LANGUE=etat.get("langue", ""),
 		CEFFIO_MIX=os.path.join(TRAVAIL, "webm.webm"))
-	subprocess.run(["python3", "/app/finaliser.py", PISTES, os.path.join(TRAVAIL, "transcription.srt"), str(debut_webm)],
-		env=environnement, check=False)
-	deposer(jeton, etat, webm)
+	debut = time.time()
+	_dernier.update({"room": jeton, "started": debut, "result": "running", "error": None})
+	try:
+		copie = subprocess.run(["python3", "/app/finaliser.py", PISTES,
+			os.path.join(TRAVAIL, "transcription.srt"), str(debut_webm)],
+			env=environnement, check=False)
+		if copie.returncode != 0:
+			raise RuntimeError("transcription exited with %d" % copie.returncode)
+		deposer(jeton, etat, webm)
+		_dernier.update({"result": "transcribed", "ended": time.time(),
+			"seconds": round(time.time() - debut, 1)})
+	except Exception as e:
+		_dernier.update({"result": "failed", "error": repr(e), "ended": time.time()})
+		print("finalisation failed: %r" % e, flush=True)
 def boucle():
 	while True:
 		try:
@@ -292,6 +310,14 @@ def boucle():
 
 class Sante(BaseHTTPRequestHandler):
 	def do_GET(self):
+		if self.path == "/status":
+			corps = json.dumps(_dernier).encode()
+			self.send_response(200)
+			self.send_header("Content-Type", "application/json")
+			self.send_header("Content-Length", str(len(corps)))
+			self.end_headers()
+			self.wfile.write(corps)
+			return
 		self.send_response(200 if self.path == "/healthz" else 404)
 		self.end_headers()
 		self.wfile.write(b"ok")

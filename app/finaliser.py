@@ -4,11 +4,19 @@ Input : the Opus tracks in /work/pistes (one per participant).
 Output: a named .srt, re-aligned on the recording start.
 
 NO INTERMEDIATE FILE IS KEPT: the Opus tracks ARE the capture format, they are
-decoded in memory for transcription, and only the subtitles are delivered. A
-WAV would only multiply disk usage by ten for a format nobody ships.
+decoded in memory for transcription, and only the subtitles are delivered.
 
-The language is detected PER TRACK: two participants may speak two different
-languages in the same call.
+The language is detected PER SPEECH CHUNK: two participants may speak two
+different languages in the same call, and one participant may switch mid-sentence.
+
+ALIGNMENT: each track knows when it opened (pistes.json), the recording knows
+when it started (its name). The gap between the two is the shift, and it is
+within a couple of seconds — the tracks are opened when the call starts.
+Measuring the shift by correlating the track against the mix was tried and
+REMOVED: on a live recording it answered -16.8 s with a confidence of 0.51, and
+the shift pushed one participant's whole transcript before zero, where it was
+dropped. A wrong measurement cost the content; the timestamp is wrong by a
+second or two, which a subtitle tolerates.
 """
 import glob
 import json
@@ -43,7 +51,8 @@ def speech_chunks(audio, rate=16000):
 	"""Speech regions of one track, in samples, with a little padding."""
 	from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-	regions = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=400, speech_pad_ms=200))
+	regions = get_speech_timestamps(audio, VadOptions(
+		threshold=0.3, min_silence_duration_ms=400, speech_pad_ms=200))
 	return [(int(r["start"]), int(r["end"])) for r in regions]
 
 
@@ -53,8 +62,7 @@ def transcribe(audio, room_language, model, rate=16000):
 	ONE DECISION PER TRACK WAS WRONG, and it was observed: a participant who
 	speaks French and ends with one Arabic sentence had the whole track forced
 	through the Arabic model, because detection saw 0.66 for Arabic and the
-	French majority was lost. A call is not always monolingual — a meeting in
-	Algeria certainly is not.
+	French majority was lost.
 
 	Each chunk is detected on its own; the room language is the tie-breaker
 	when the detection is not confident.
@@ -62,7 +70,7 @@ def transcribe(audio, room_language, model, rate=16000):
 	lines = []
 	for start, end in speech_chunks(audio, rate):
 		chunk = audio[start:end]
-		if len(chunk) < rate:
+		if len(chunk) < rate // 2:
 			continue
 		segments, info = model.transcribe(chunk, language=None, beam_size=5, vad_filter=False)
 		language = info.language
@@ -76,56 +84,8 @@ def transcribe(audio, room_language, model, rate=16000):
 					"start": start / rate + float(s.start),
 					"end": start / rate + float(s.end),
 					"text": text,
-					"language": language,
 				})
 	return lines
-
-
-def envelope(audio, rate=16000, pas=1600):
-	"""RMS per 100 ms — the shape of the speech, not its content."""
-	import numpy as np
-
-	n = len(audio) // pas * pas
-	if n == 0:
-		return np.zeros(0, dtype=np.float32)
-	return np.sqrt((audio[:n].reshape(-1, pas) ** 2).mean(axis=1))
-
-
-def measure_offset(mix, track, maximum=30.0, rate=16000):
-	"""Find s such that mix[t] looks like track[t + s], in seconds.
-
-	WHY MEASURE INSTEAD OF TRUSTING TIMESTAMPS: the capture joins at the
-	"starting" state, up to a dozen seconds before the recorder writes its
-	first sample, and that lead differs per participant. On a live recording
-	the .srt placed speech at 0 s where the .webm was silent for 12 s — the
-	assumption was wrong, the measurement is what the prototype used to get
-	6.4 s and 11.2 s.
-
-	Returns (offset, confidence); confidence is the correlation at the best
-	shift, and the caller ignores an offset below 0.4.
-	"""
-	import numpy as np
-
-	em = envelope(mix, rate)
-	ep = envelope(track, rate)
-	meilleur, meilleur_s = -1.0, 0.0
-	pas = int(maximum * 10)
-	for d in range(-pas, pas + 1):
-		# mix[t] ~ track[t + d/10]
-		if d >= 0:
-			a, b = em[d:], ep[:len(em) - d]
-		else:
-			a, b = em[:d], ep[-d:]
-		n = min(len(a), len(b))
-		if n < 50:
-			continue
-		a, b = a[:n], b[:n]
-		if a.std() == 0 or b.std() == 0:
-			continue
-		c = float(np.corrcoef(a, b)[0, 1])
-		if c > meilleur:
-			meilleur, meilleur_s = c, d / 10.0
-	return meilleur_s, meilleur
 
 
 def timestamp(t):
@@ -149,14 +109,10 @@ def main():
 	if os.path.exists(path):
 		names = json.load(open(path))
 
-	mix = None
 	duration = None
-	# CEFFIO_MIX is set by the agent, which fetches the recording next to the
-	# tracks; the fallback keeps the script usable by hand.
 	chemin_mix = os.environ.get("CEFFIO_MIX") or os.path.join(folder, "webm.webm")
 	if os.path.exists(chemin_mix):
-		mix = pcm(chemin_mix)
-		duration = len(mix) / 16000.0
+		duration = len(pcm(chemin_mix)) / 16000.0
 
 	from faster_whisper import WhisperModel
 
@@ -169,27 +125,21 @@ def main():
 		who = names.get(session, "participant " + session[:6])
 		# Each track opens at its own moment: the WebRTC subscription is not
 		# simultaneous, and the gap differs per participant.
-		# Measured alignment when the recording is available; the timestamp
-		# reference is only a fallback (and it is known to be off by the
-		# capture's lead).
 		reference = tracks.get(session, webm_start)
-		if mix is not None:
-			mesure, confiance = measure_offset(mix, pcm(track))
-			print("side %s: measured offset %.1fs (confidence %.2f)" % (session[:8], mesure, confiance), flush=True)
-			if confiance >= 0.4:
-				reference = webm_start + mesure
-			else:
-				print("  confidence too low, keeping the timestamp reference", flush=True)
+		print("side %s: shift %+.1fs" % (session[:8], reference - webm_start), flush=True)
 		for seg in transcribe(pcm(track), room_language, model):
 			start = seg["start"] + reference - webm_start
 			end = seg["end"] + reference - webm_start
 			if end <= 0:
 				continue
-			# Tracks keep growing while the call lasts: anything past the
-			# recording belongs to another recording (or to nothing).
-			if duration is not None and start > duration:
+			# Tracks keep growing while the call lasts: anything clearly past
+			# the recording belongs to another recording (or to nothing). A
+			# two-second margin, because the shift is an estimate.
+			if duration is not None and start > duration + 2:
 				continue
-			lines.append({"start": max(0.0, start), "end": end, "who": who, "text": seg["text"]})
+			# A slightly early subtitle is better than a missing one: clamping
+			# keeps the words, dropping them made an entire participant vanish.
+			lines.append({"start": max(0.2, start), "end": end, "who": who, "text": seg["text"]})
 
 	lines.sort(key=lambda x: x["start"])
 	with open(output, "w", encoding="utf-8") as f:

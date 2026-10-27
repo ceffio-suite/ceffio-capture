@@ -267,15 +267,44 @@ def deposer(jeton, etat, chemin_webm):
 
 	executer(NS_FILES, pod, ["sh", "-c", "printf %%s '%s' | base64 -d > '%s.srt'" % (donnees, base)])
 	executer(NS_FILES, pod, ["sh", "-c", "chown www-data:www-data '%s.srt'" % base])
-	dossier = os.path.dirname(chemin_webm)
+	# THE LOCAL NAME MUST NOT SHADOW dossier(), THE FUNCTION: the first version
+	# assigned `dossier = os.path.dirname(...)` here, which made the earlier
+	# `dossier(jeton)` a local variable read before assignment — a
+	# UnboundLocalError, on the ONE line that writes the transcript. Observed on
+	# the first real recording: the transcription succeeded, and the file was
+	# never deposited.
 	executer(NS_FILES, pod, ["su", "-s", "/bin/sh", "www-data", "-c",
-		"php occ files:scan --path=\"%s\"" % dossier[len("/var/www/html/data/"):]])
+		"php occ files:scan --path=\"%s\"" % chemin_scan(chemin_webm)])
 	print("deposited %s.srt" % base, flush=True)
+
+
+# RACINE_NC is where Nextcloud keeps the users' files inside its pod.
+RACINE_NC = "/var/www/html/data/"
+
+
+def chemin_scan(chemin_webm):
+	"""The path `occ files:scan --path` expects: relative to the data directory.
+
+	WHY RELATIVE: occ resolves --path under the data directory. The absolute
+	path makes it look for a user named "var", answer "user var not found", and
+	the transcript stays on disk, invisible in the interface — a deposit that
+	looks done and is not.
+	"""
+	dossier_webm = os.path.dirname(chemin_webm)
+	if dossier_webm.startswith(RACINE_NC):
+		return dossier_webm[len(RACINE_NC):]
+	return dossier_webm
 
 
 def finaliser(jeton, etat):
 	webm = attendre_webm(jeton, etat["webm_avant"])
 	if not webm:
+		# A MISSING .webm IS A FAILED JOB, not a quiet evening: the transcript
+		# has nowhere to go, and /status must say it. Left at "none", an operator
+		# sees a healthy module and a meeting that will never be transcribed.
+		# The work directory is kept (see nettoyer) so the audio can be retried.
+		_dernier.update({"room": jeton, "result": "failed", "ended": time.time(),
+			"error": "no .webm to attach the transcript to"})
 		print(f"no new .webm for {jeton}: transcript not deposited", flush=True)
 		return
 	nom = os.path.basename(webm)[: -len(".webm")].replace("Recording ", "").replace(" ", "T")

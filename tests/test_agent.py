@@ -164,5 +164,40 @@ class TestTravail(unittest.TestCase):
 			[("demarrer", "salon1"), ("demarrer", "salon1")])
 
 
+class TestSansWebm(unittest.TestCase):
+	"""A stop with no .webm must be a FAILED job, not a silent one."""
+
+	def test_le_statut_dit_echec(self):
+		agent._dernier.update({"result": "none", "error": None})
+		vrai = agent.attendre_webm
+		agent.attendre_webm = lambda jeton, avant, delai=0: ""
+		try:
+			agent.finaliser("salon1", {"webm_avant": set(), "langue": ""})
+		finally:
+			agent.attendre_webm = vrai
+		self.assertEqual(agent._dernier["result"], "failed")
+		self.assertIn("webm", agent._dernier["error"])
+
+
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestCheminDeScan(unittest.TestCase):
+	"""The path `occ files:scan` receives.
+
+	CE BUG-LÀ A COÛTÉ UN VRAI ENREGISTREMENT : un `dossier = ...` local masquait
+	la fonction `dossier()`, et le dépôt levait UnboundLocalError après une
+	transcription réussie. Le test couvre la conversion de chemin, la seule
+	partie qui peut être fausse sans qu'on le voie dans les journaux.
+	"""
+
+	def test_chemin_relatif_a_la_racine_des_donnees(self):
+		self.assertEqual(
+			agent.chemin_scan("/var/www/html/data/amina/files/Talk/Recording/tok/Recording 2026-10-27 11-50-17.webm"),
+			"amina/files/Talk/Recording/tok")
+
+	def test_chemin_hors_racine_rendu_tel_quel(self):
+		# Un chemin inattendu ne doit pas être tronqué au hasard : mieux vaut un
+		# scan qui échoue franchement qu'un chemin qui désigne un autre dossier.
+		self.assertEqual(agent.chemin_scan("/autre/endroit/x.webm"), "/autre/endroit")

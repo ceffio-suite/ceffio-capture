@@ -120,14 +120,28 @@ def main():
 			cpu_threads=THREADS, download_root=MODELS)
 
 	lines = []
+	exploitees = 0
 	for track in sorted(glob.glob(os.path.join(folder, "*.opus"))):
 		session = os.path.basename(track)[:-len(".opus")]
+		# UNE PISTE ILLISIBLE NE DOIT PAS COÛTER LES AUTRES. Un fichier de zéro
+		# octet suffisait à faire échouer toute la transcription — et donc à ne
+		# rien déposer. On la saute, on le dit, et on continue : les mots des
+		# autres participants existent.
+		try:
+			audio = pcm(track)
+		except Exception as e:
+			print(json.dumps({"track_skipped": os.path.basename(track), "error": repr(e)}), flush=True)
+			continue
+		if audio.size == 0:
+			print(json.dumps({"track_skipped": os.path.basename(track), "error": "no audio"}), flush=True)
+			continue
+		exploitees += 1
 		who = names.get(session, "participant " + session[:6])
 		# Each track opens at its own moment: the WebRTC subscription is not
 		# simultaneous, and the gap differs per participant.
 		reference = tracks.get(session, webm_start)
 		print("side %s: shift %+.1fs" % (session[:8], reference - webm_start), flush=True)
-		for seg in transcribe(pcm(track), room_language, model):
+		for seg in transcribe(audio, room_language, model):
 			start = seg["start"] + reference - webm_start
 			end = seg["end"] + reference - webm_start
 			if end <= 0:
@@ -140,6 +154,13 @@ def main():
 			# A slightly early subtitle is better than a missing one: clamping
 			# keeps the words, dropping them made an entire participant vanish.
 			lines.append({"start": max(0.2, start), "end": end, "who": who, "text": seg["text"]})
+
+	if exploitees == 0:
+		# AUCUNE PISTE EXPLOITABLE : ce n'est pas un transcript vide qu'il faut
+		# déposer, c'est un échec qu'il faut dire. Le code de sortie non nul fait
+		# garder le dossier de travail pour une reprise.
+		print(json.dumps({"error": "no track could be transcribed"}), flush=True)
+		sys.exit(2)
 
 	lines.sort(key=lambda x: x["start"])
 	with open(output, "w", encoding="utf-8") as f:

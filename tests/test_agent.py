@@ -5,6 +5,7 @@ is the contract the relay depends on — 202 for an authentic notification, 403
 for a forged one, and the effects carried out once — not the API calls the pod
 will make. Those are exercised on a live installation.
 """
+import base64
 import http.client
 import subprocess
 import tempfile
@@ -38,10 +39,13 @@ SECRET = "s3cret"
 
 
 def corps(type_="start", token="salon1"):
+	# L'HORODATAGE DOIT ÊTRE DANS LA FENÊTRE ANTI-REJEU : une valeur figée dans
+	# le passé fait refuser la notification au bout de deux minutes de vie du
+	# test, ce qui est exactement ce que la fenêtre doit faire.
 	return json.dumps({"type": type_, "token": token, "owner": "alice",
 		"actor": {"type": "users", "id": "alice"},
 		"backend": "https://cloud.exemple.org/",
-		"at": "2026-10-26T20:00:00Z"}).encode()
+		"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}).encode()
 
 
 class Serveur:
@@ -52,7 +56,11 @@ class Serveur:
 		self.port = self.srv.server_address[1]
 		threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
-	def poster(self, chemin, corps, aleatoire="abc123", somme=None, entetes=None):
+	def poster(self, chemin, corps, aleatoire=None, somme=None, entetes=None):
+		# UN NONCE NEUF PAR DÉFAUT : la fenêtre anti-rejeu refuse deux fois le
+		# même, et un test qui réutiliserait "abc123" partout se ferait refuser
+		# à partir du second envoi.
+		aleatoire = os.urandom(8).hex() if aleatoire is None else aleatoire
 		connexion = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
 		entetes = dict(entetes or {})
 		entetes["Content-Type"] = "application/json"
@@ -96,6 +104,18 @@ class TestEndpoint(unittest.TestCase):
 		self.assertEqual(code, 403)
 		with self.assertRaises(queue.Empty):
 			agent._FILE.get_nowait()
+
+	def test_rejeu_de_la_meme_notification_refuse(self):
+		corps_ = corps()
+		nonce = "nonce-de-test-1"
+		code, _ = self.serveur.poster("/v1/recording", corps_, aleatoire=nonce)
+		self.assertEqual(code, 202)
+		# MÊME CORPS, MÊME NONCE : la signature est valide, et c'est justement le
+		# cas que la fenêtre doit arrêter — sinon une notification capturée
+		# ouvrirait un second travail pour le même salon.
+		code, _ = self.serveur.poster("/v1/recording", corps_, aleatoire=nonce)
+		self.assertEqual(code, 400)
+		vider_file()
 
 	def test_signature_absente_refusee(self):
 		code, _ = self.serveur.poster("/v1/recording", corps(), aleatoire="")
@@ -180,6 +200,41 @@ class TestSansWebm(unittest.TestCase):
 			agent.attendre_webm = vrai
 		self.assertEqual(agent._dernier["result"], "failed")
 		self.assertIn("webm", agent._dernier["error"])
+
+
+class TestCitationDesChemins(unittest.TestCase):
+	"""Le chemin du .srt porte l'identifiant Nextcloud, qui accepte l'apostrophe.
+
+	Le test exécute la VRAIE commande, avec un vrai `sh`, dans un dossier dont
+	le nom contient "o'brien x" : si la quotation manque, le fichier n'est pas
+	écrit là où on regarde — exactement ce qui arriverait dans le pod.
+	"""
+
+	def test_un_identifiant_avec_apostrophe_et_espace(self):
+		tmp = tempfile.mkdtemp()
+		# LE DOSSIER QUE NEXTCLOUD CRÉE POUR UN TEL UTILISATEUR.
+		dossier = os.path.join(tmp, "o'brien x", "files", "Talk", "Recording", "tok1234")
+		os.makedirs(dossier)
+		chemin_srt = os.path.join(dossier, "Recording 2026-10-28 10-00-00.srt")
+		contenu = "1\n00:00:00,200 --> 00:00:01,000\namina : bonjour\n"
+		b64 = base64.b64encode(contenu.encode()).decode()
+
+		subprocess.run(agent.commande_ecriture(chemin_srt, b64), check=True)
+
+		self.assertTrue(os.path.exists(chemin_srt), "le .srt n'a pas été écrit : la quotation manque")
+		with open(chemin_srt, encoding="utf-8") as f:
+			self.assertEqual(f.read(), contenu)
+
+	def test_une_injection_ne_s_execute_pas(self):
+		# LE JETON EST REFUSÉ EN AMONT, ceci est la seconde barrière : même si un
+		# chemin contenant un point-virgule arrivait ici, il doit rester un NOM de
+		# fichier, pas une commande. On l'exécute pour le prouver.
+		tmp = tempfile.mkdtemp()
+		piege = os.path.join(tmp, "x; touch pirate_injecte ;.srt")
+		subprocess.run(agent.commande_ecriture(piege, "YWJj"), check=True, cwd=tmp)
+		self.assertFalse(os.path.exists(os.path.join(tmp, "pirate_injecte")),
+			"le point-virgule a été interprété : la valeur n'est pas quotée")
+		self.assertTrue(os.path.exists(piege), "le fichier au nom bizarre doit exister, lui")
 
 
 if __name__ == "__main__":

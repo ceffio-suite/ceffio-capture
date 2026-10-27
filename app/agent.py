@@ -19,6 +19,7 @@ import queue
 import shutil
 import json
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -50,6 +51,9 @@ DELAI_ARRET = float(os.environ.get("CEFFIO_STOP_GRACE", "10"))
 
 _FILE = queue.Queue()
 _etat = notification.Etat()
+# LA FENÊTRE ANTI-REJEU, partagée par tout le service : un nonce vu une fois ne
+# l'est plus jamais pendant deux minutes, quel que soit le salon.
+_rejeu = notification.Rejeu()
 
 
 def dossier(jeton):
@@ -138,12 +142,21 @@ def executer(namespace, pod, commande, entree=None, conteneur=None):
 
 
 def webm_de_la_salle(jeton):
+	"""Les .webm du salon, trouvés par find, SANS SHELL.
+
+	LE JETON EST VALIDÉ À L'ENTRÉE (notification.lire), mais il ne doit pas
+	pour autant être une parole de shell : il vient d'une requête dont la
+	signature ne couvre PAS le chemin. Ici il est un ARGUMENT de find, et il ne
+	peut plus rien exécuter.
+
+	splitlines(), pas split() : un nom d'enregistrement contient des espaces
+	("Recording 2026-10-25 23-00-52.webm") et un découpage sur les blancs
+	rendait des fragments qui se lisent comme une date.
+	"""
 	pod = pod_de(NS_FILES, "app=nextcloud")
-	# splitlines(), NOT split(): a recording path contains spaces
-	# ("Recording 2026-10-25 23-00-52.webm"), and splitting on whitespace
-	# returned fragments that parse as a time and fail.
-	return [ligne.strip() for ligne in executer(NS_FILES, pod, ["sh", "-c",
-		f"ls -1 /var/www/html/data/*/files/Talk/Recording/{jeton}/*.webm 2>/dev/null"]).splitlines() if ligne.strip()]
+	motif = "*/files/Talk/Recording/%s/*.webm" % jeton
+	sortie = executer(NS_FILES, pod, ["find", "/var/www/html/data", "-type", "f", "-path", motif])
+	return [ligne.strip() for ligne in sortie.splitlines() if ligne.strip()]
 
 
 def demarrer(jeton):
@@ -186,6 +199,15 @@ def nettoyer(jeton):
 	(CEFFIO_KEEP_FAILED_HOURS, 24 h by default) so it can be retried.
 	"""
 	base = dossier(jeton)
+	# DÉFENSE EN PROFONDEUR : même validé à l'entrée, le jeton ne doit jamais
+	# pouvoir désigner autre chose que SON dossier. rmtree sur un chemin calculé
+	# est une suppression de fichiers arbitraire si un jour la validation se
+	# relâche.
+	racine = os.path.realpath(os.path.join(TRAVAIL, "salons"))
+	cible = os.path.realpath(base)
+	if cible != os.path.join(racine, jeton) or not cible.startswith(racine + os.sep):
+		print(f"nettoyer: {base!r} sort du dossier de travail, ignoré", flush=True)
+		return
 	dernier = _dernier.get("room") == jeton and _dernier.get("result") == "failed"
 	if dernier:
 		age = time.time() - os.path.getmtime(base) if os.path.exists(base) else 0
@@ -278,8 +300,13 @@ def deposer(jeton, etat, chemin_webm):
 	with open(srt, "rb") as f:
 		donnees = base64.b64encode(f.read()).decode("ascii")
 
-	executer(NS_FILES, pod, ["sh", "-c", "printf %%s '%s' | base64 -d > '%s.srt'" % (donnees, base)])
-	executer(NS_FILES, pod, ["sh", "-c", "chown www-data:www-data '%s.srt'" % base])
+	# TOUT CE QUI EST INTERPOLÉ EST QUOTÉ. Le chemin contient l'identifiant
+	# Nextcloud, qui accepte l'apostrophe et l'espace ("o'brien x") : sans
+	# quotation, le shell couperait le chemin et écrirait ailleurs.
+	chemin_srt = base + ".srt"
+	executer(NS_FILES, pod, commande_ecriture(chemin_srt, donnees))
+	# chown n'a besoin d'aucun shell : des arguments, et rien d'autre.
+	executer(NS_FILES, pod, ["chown", "www-data:www-data", chemin_srt])
 	# THE LOCAL NAME MUST NOT SHADOW dossier(), THE FUNCTION: the first version
 	# assigned `dossier = os.path.dirname(...)` here, which made the earlier
 	# `dossier(jeton)` a local variable read before assignment — a
@@ -287,8 +314,20 @@ def deposer(jeton, etat, chemin_webm):
 	# the first real recording: the transcription succeeded, and the file was
 	# never deposited.
 	executer(NS_FILES, pod, ["su", "-s", "/bin/sh", "www-data", "-c",
-		"php occ files:scan --path=\"%s\"" % chemin_scan(chemin_webm)])
+		"php occ files:scan --path=%s" % shlex.quote(chemin_scan(chemin_webm))])
 	print("deposited %s.srt" % base, flush=True)
+
+
+def commande_ecriture(chemin_srt, donnees_b64):
+	"""La commande qui écrit le .srt, les deux valeurs QUOTÉES.
+
+	Une redirection a besoin d'un shell ; on le garde donc pour ce seul geste,
+	et chaque valeur qui y entre passe par shlex.quote. Le chemin porte
+	l'identifiant Nextcloud, qui accepte l'apostrophe et l'espace : c'est le cas
+	que le test couvre, avec "o'brien x".
+	"""
+	return ["sh", "-c", "printf %%s %s | base64 -d > %s"
+		% (shlex.quote(donnees_b64), shlex.quote(chemin_srt))]
 
 
 # RACINE_NC is where Nextcloud keeps the users' files inside its pod.
@@ -330,7 +369,9 @@ def finaliser(jeton, etat):
 	# binary read comes back corrupted.
 	pod = pod_de(NS_FILES, "app=nextcloud")
 	try:
-		encode = executer(NS_FILES, pod, ["sh", "-c", "base64 -w0 '%s'" % webm])
+		# AUCUN SHELL ICI NON PLUS : le chemin vient de Nextcloud et peut
+		# contenir une apostrophe.
+		encode = executer(NS_FILES, pod, ["base64", "-w0", webm])
 		with open(os.path.join(dossier(jeton), "webm.webm"), "wb") as f:
 			f.write(base64.b64decode(encode))
 	except Exception as e:
@@ -494,6 +535,14 @@ class Sante(BaseHTTPRequestHandler):
 			avis = notification.lire(corps)
 		except notification.Refus as refus:
 			self._repond(refus.code, str(refus).encode())
+			return
+
+		# APRÈS LA SIGNATURE, AVANT LA FILE : une notification authentique mais
+		# rejouée n'a pas à ouvrir un second travail. Le nonce est celui qui a
+		# servi à signer.
+		if raison := _rejeu.accepter(self.headers.get("Ceffio-Relay-Random", ""), avis.get("at")):
+			print(f"notification refusée : {raison}", flush=True)
+			self._repond(400, raison.encode())
 			return
 
 		# 202, NOT 200: the work is queued, not done. The relay gives us two

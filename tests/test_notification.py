@@ -8,6 +8,7 @@ recorder fails here.
 """
 import json
 import os
+from datetime import datetime, timezone
 import sys
 import unittest
 
@@ -78,6 +79,25 @@ class TestLecture(unittest.TestCase):
 		with self.assertRaises(notification.Refus):
 			notification.lire(json.dumps(corps).encode())
 
+	def test_jetons_dangereux_refuses(self):
+		# LA SIGNATURE NE COUVRE PAS LE CHEMIN : un jeton "authentique" peut
+		# contenir n'importe quoi, et il finit dans des chemins de fichiers.
+		for jeton in ["x;id", "../../etc", "", "a b", "tok/../x", "tok$(id)",
+			"1234567890123456789012345678901234567890123456789012345678901234567890"]:
+			corps = json.loads(avis("start"))
+			corps["token"] = jeton
+			with self.assertRaises(notification.Refus, msg="jeton %r accepté" % jeton) as ctx:
+				notification.lire(json.dumps(corps).encode())
+			self.assertEqual(ctx.exception.code, 400, "jeton %r : code %s" % (jeton, ctx.exception.code))
+
+	def test_jetons_legitimes_acceptes(self):
+		# 8 caractères alphanumériques (Talk), 10 chiffres (SIP), et la marge
+		# de longueur qu'on s'autorise.
+		for jeton in ["7kxkkuxm", "1234567890", "abcd", "A1b2C3d4"]:
+			corps = json.loads(avis("start"))
+			corps["token"] = jeton
+			self.assertEqual(notification.lire(json.dumps(corps).encode())["token"], jeton)
+
 	def test_non_json_refuse(self):
 		with self.assertRaises(notification.Refus):
 			notification.lire(b"pas du json")
@@ -90,6 +110,50 @@ class TestLecture(unittest.TestCase):
 		with self.assertRaises(notification.Refus) as ctx:
 			notification.lire(b"a" * (notification.MAX_BODY + 1))
 		self.assertEqual(ctx.exception.code, 413)
+
+
+class TestRejeu(unittest.TestCase):
+	"""La signature prouve l'origine ; elle ne prouve pas la NOUVEAUTÉ."""
+
+	def maintenant(self):
+		return 1793200000.0  # une seconde fixe, pour un test déterministe
+
+	def at(self, decalage):
+		return datetime.fromtimestamp(self.maintenant() + decalage, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+	def test_notification_recente_acceptee(self):
+		r = notification.Rejeu(horloge=self.maintenant)
+		self.assertIsNone(r.accepter("nonce1", self.at(-5)))
+
+	def test_notification_trop_vieille_refusee(self):
+		r = notification.Rejeu(horloge=self.maintenant)
+		self.assertIn("window", r.accepter("nonce1", self.at(-300)))
+
+	def test_notification_trop_en_avance_refusee(self):
+		# Une horloge en avance est aussi un signe de rejeu ou de falsification.
+		r = notification.Rejeu(horloge=self.maintenant)
+		self.assertIn("window", r.accepter("nonce1", self.at(+300)))
+
+	def test_meme_nonce_deux_fois_refuse(self):
+		r = notification.Rejeu(horloge=self.maintenant)
+		self.assertIsNone(r.accepter("nonce1", self.at(-1)))
+		self.assertIn("replay", r.accepter("nonce1", self.at(-1)))
+
+	def test_nonce_reutilisable_apres_la_fenetre(self):
+		instant = [self.maintenant()]
+		r = notification.Rejeu(horloge=lambda: instant[0])
+		maintenant = lambda: datetime.fromtimestamp(instant[0], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+		self.assertIsNone(r.accepter("nonce1", maintenant()))
+		instant[0] += notification.FENETRE + 1
+		self.assertIsNone(r.accepter("nonce1", maintenant()))
+
+	def test_sans_horodatage_refuse(self):
+		r = notification.Rejeu(horloge=self.maintenant)
+		self.assertIn("timestamp", r.accepter("nonce1", None))
+
+	def test_horodatage_illisible_refuse(self):
+		r = notification.Rejeu(horloge=self.maintenant)
+		self.assertIn("timestamp", r.accepter("nonce1", "hier"))
 
 
 class TestEtat(unittest.TestCase):

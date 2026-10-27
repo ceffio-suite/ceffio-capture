@@ -6,11 +6,14 @@ for a forged one, and the effects carried out once — not the API calls the pod
 will make. Those are exercised on a live installation.
 """
 import http.client
+import subprocess
+import tempfile
 import json
 import os
 import queue
 import sys
 import threading
+import time
 import types
 import unittest
 from http.server import HTTPServer
@@ -201,3 +204,64 @@ class TestCheminDeScan(unittest.TestCase):
 		# Un chemin inattendu ne doit pas être tronqué au hasard : mieux vaut un
 		# scan qui échoue franchement qu'un chemin qui désigne un autre dossier.
 		self.assertEqual(agent.chemin_scan("/autre/endroit/x.webm"), "/autre/endroit")
+
+
+class TestArretPropre(unittest.TestCase):
+	"""The client must be given time to CLOSE its files.
+
+	PyAV writes the audio only at close(): killing the process first leaves a
+	zero-byte track, which is what a real recording produced before this test
+	existed. These two tests use a real subprocess, because the property is
+	about process control, not about code paths.
+	"""
+
+	SCRIPT = "import os,sys,time\nwhile time.time() < %d:\n time.sleep(0.05)\n"
+
+	def _capture(self, obeissant):
+		# LE MARQUEUR DOIT ÊTRE CELUI QUE arreter() SUPPRIME : il est construit
+		# par dossier(jeton), donc sous TRAVAIL/salons/<jeton>/recording.
+		tmp = tempfile.mkdtemp()
+		self.vrai_travail = agent.TRAVAIL
+		agent.TRAVAIL = tmp
+		os.makedirs(os.path.join(tmp, "salons", "salon1"))
+		marqueur = os.path.join(tmp, "salons", "salon1", "recording")
+		open(marqueur, "w").close()
+		# THE PROCESS LOOKS AT THE MARKER, exactly like the real client: it exits
+		# when the file disappears, and ignores it when told to.
+		code = (
+			"import os,time,sys\n"
+			"m = %r\n"
+			"fin = time.time() + 20\n"
+			"while time.time() < fin:\n"
+			"    if %r and not os.path.exists(m):\n"
+			"        open(%r, 'w').write('ferme')\n"
+			"        sys.exit(0)\n"
+			"    time.sleep(0.05)\n"
+		) % (marqueur, obeissant, os.path.join(tmp, "ferme"))
+		proc = subprocess.Popen([sys.executable, "-c", code])
+		agent._captures["salon1"] = {"proc": proc, "debut": time.time(),
+			"webm_avant": set(), "langue": "", "recording": True}
+		return tmp, marqueur, os.path.join(tmp, "ferme"), proc
+
+	def setUp(self):
+		self.vrai = agent.DELAI_ARRET
+		agent.DELAI_ARRET = 1.0
+
+	def tearDown(self):
+		agent.DELAI_ARRET = self.vrai
+		if getattr(self, "vrai_travail", None):
+			agent.TRAVAIL = self.vrai_travail
+		agent._captures.clear()
+
+	def test_le_client_ferme_ses_fichiers_avant_le_signal(self):
+		tmp, marqueur, ferme, proc = self._capture(obeissant=True)
+		agent.arreter("salon1")
+		self.assertTrue(os.path.exists(ferme), "le client n'a pas eu le temps de fermer : "
+			"l'audio serait resté dans le tampon de PyAV")
+		self.assertEqual(proc.returncode, 0)
+
+	def test_un_client_bloque_est_fini_par_le_signal(self):
+		tmp, marqueur, ferme, proc = self._capture(obeissant=False)
+		agent.arreter("salon1")
+		self.assertFalse(os.path.exists(ferme))
+		self.assertIsNotNone(proc.returncode, "le processus bloqué doit être arrêté de force")

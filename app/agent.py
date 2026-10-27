@@ -44,6 +44,10 @@ SECRET_RELAIS = os.environ.get("CEFFIO_RELAY_SECRET", "")
 # would otherwise leave a client writing audio until the volume is full.
 DUREE_MAX = float(os.environ.get("CEFFIO_MAX_HOURS", "6")) * 3600
 
+# How long the client is given to close its files when the marker disappears,
+# before it is signalled. A variable so a test can shorten it.
+DELAI_ARRET = float(os.environ.get("CEFFIO_STOP_GRACE", "10"))
+
 _FILE = queue.Queue()
 _etat = notification.Etat()
 
@@ -202,11 +206,20 @@ def arreter(jeton):
 		os.remove(marqueur(jeton))
 	except FileNotFoundError:
 		pass
-	etat["proc"].terminate()
+	# THE CLIENT WRITES ITS FILES WHEN IT CLOSES, not while it runs: PyAV keeps
+	# the audio in memory and flushes at close(). Measured in this container:
+	# fifty packets leave the file at ZERO bytes, and it holds 387 after close().
+	# So the marker above is the signal, and the wait below is the time it takes
+	# to notice it — a SIGTERM first would destroy the meeting's audio.
 	try:
-		etat["proc"].wait(timeout=15)
+		etat["proc"].wait(timeout=DELAI_ARRET)
 	except subprocess.TimeoutExpired:
-		etat["proc"].kill()
+		# ONLY IF IT DOES NOT COME BACK: a client stuck on a dead socket.
+		etat["proc"].terminate()
+		try:
+			etat["proc"].wait(timeout=5)
+		except subprocess.TimeoutExpired:
+			etat["proc"].kill()
 	return etat
 
 

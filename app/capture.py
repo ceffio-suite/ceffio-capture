@@ -28,6 +28,24 @@ from spreed_client import SpreedClient  # noqa: E402
 TRAVAIL = os.environ.get("CEFFIO_WORK", "/work")
 SORTIE = os.path.join(TRAVAIL, "pistes")
 
+# TOUTES LES PISTES OUVERTES, pour pouvoir les FERMER avant de mourir.
+#
+# POURQUOI C'EST INDISPENSABLE, ET PAS UNE POLITESSE : PyAV ne vide le fichier
+# qu'à la fermeture du conteneur. Mesuré dans ce conteneur : cinquante paquets
+# muxés laissent le fichier à ZÉRO octet, et il en fait 387 après close(). Un
+# processus tué par SIGTERM n'appelle jamais close() : l'audio entier de la
+# réunion disparaît, et la transcription échoue sur une piste vide. Observé sur
+# un vrai enregistrement (deux pistes de 0 octet, un .webm de 5,4 Mo avec du son).
+INSTANCES = []
+
+
+async def fermer_tout():
+	for piste in list(INSTANCES):
+		try:
+			await piste.shutdown()
+		except Exception as e:
+			print(f"fermeture de piste : {e!r}", flush=True)
+
 # WRITE NOTHING UNTIL THE RECORDING STARTS. The client joins the call as soon
 # as it begins — that is what gives it time to subscribe before anyone presses
 # record — but a meeting nobody records must not leave audio on disk. The agent
@@ -47,6 +65,7 @@ class PisteOpus:
 
 	def __init__(self, sid, *args, **kwargs):
 		self.sid = sid
+		INSTANCES.append(self)
 		self.conteneur = None
 		self.piste = None
 		self.tache = None
@@ -97,9 +116,12 @@ class PisteOpus:
 			json.dump(existantes, f)
 
 	async def _boucle(self, stream):
+		trames = 0
+		paquets = 0
 		try:
 			while True:
 				frame = await stream.receive()
+				trames += 1
 				if self.conteneur is None:
 					if not os.path.exists(MARQUEUR):
 						continue
@@ -109,7 +131,13 @@ class PisteOpus:
 				for sortie in self.resampler.resample(frame):
 					sortie.pts = None
 					for paquet in self.piste.encode(sortie):
+						paquets += 1
 						self.conteneur.mux(paquet)
+				# UN COMPTE RÉGULIER, pour distinguer "aucune trame reçue" de
+				# "des trames, mais rien d'écrit" — la question qui a coûté deux
+				# enregistrements avant d'être tranchée.
+				if trames % 500 == 0:
+					print(f"piste {self.sid[:10]} : {trames} trames, {paquets} paquets", flush=True)
 		except Exception as e:
 			print(f"fin de piste {self.sid[:10]} : {e!r}", flush=True)
 		finally:
@@ -155,9 +183,22 @@ async def main():
 	if resultat != SigConnectResult.SUCCESS:
 		raise SystemExit("connexion au signaling impossible")
 
+	# LE MARQUEUR EST LE SIGNAL D'ARRÊT, et il est lu ici plutôt que de compter
+	# sur un SIGTERM : le processus doit FERMER ses conteneurs, sinon l'audio
+	# reste dans le tampon de PyAV et le fichier fait zéro octet.
+	async def surveiller(arret):
+		while not arret.is_set():
+			if not os.path.exists(MARQUEUR):
+				print("marqueur disparu : fermeture des pistes", flush=True)
+				arret.set()
+				return
+			await asyncio.sleep(0.2)
+
+	arret = asyncio.Event()
+	guetteur = asyncio.create_task(surveiller(arret))
 	ajoutes = set()
 	try:
-		while not client.defunct.is_set():
+		while not client.defunct.is_set() and not arret.is_set():
 			for nc_sid in list(client.nc_sid_map):
 				if nc_sid in ajoutes:
 					continue
@@ -167,6 +208,9 @@ async def main():
 				json.dump(getattr(client, "roster", {}), f, indent=2, ensure_ascii=False)
 			await asyncio.sleep(2)
 	finally:
+		guetteur.cancel()
+		# FERMER AVANT DE PARTIR : c'est là que les fichiers sont écrits.
+		await fermer_tout()
 		await client.close()
 
 

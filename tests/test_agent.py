@@ -39,9 +39,9 @@ SECRET = "s3cret"
 
 
 def corps(type_="start", token="salon1"):
-	# L'HORODATAGE DOIT ÊTRE DANS LA FENÊTRE ANTI-REJEU : une valeur figée dans
-	# le passé fait refuser la notification au bout de deux minutes de vie du
-	# test, ce qui est exactement ce que la fenêtre doit faire.
+	# THE TIMESTAMP MUST BE INSIDE THE REPLAY WINDOW: a value frozen in the past
+	# would make the notification refused two minutes into the test's life —
+	# which is exactly what the window is for.
 	return json.dumps({"type": type_, "token": token, "owner": "alice",
 		"actor": {"type": "users", "id": "alice"},
 		"backend": "https://cloud.exemple.org/",
@@ -57,9 +57,9 @@ class Serveur:
 		threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
 	def poster(self, chemin, corps, aleatoire=None, somme=None, entetes=None):
-		# UN NONCE NEUF PAR DÉFAUT : la fenêtre anti-rejeu refuse deux fois le
-		# même, et un test qui réutiliserait "abc123" partout se ferait refuser
-		# à partir du second envoi.
+		# A FRESH NONCE BY DEFAULT: the replay window refuses the same one twice,
+		# and a test reusing "abc123" everywhere would be refused from the second
+		# send on.
 		aleatoire = os.urandom(8).hex() if aleatoire is None else aleatoire
 		connexion = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
 		entetes = dict(entetes or {})
@@ -95,7 +95,7 @@ class TestEndpoint(unittest.TestCase):
 	def test_notification_authentique_acceptee(self):
 		code, corps_rep = self.serveur.poster("/v1/recording", corps())
 		# 202, PAS 200: le travail est mis en file, pas fait — le relais n'attend
-		# que deux secondes et ne réessaie pas.
+		# two seconds and does not retry.
 		self.assertEqual(code, 202, corps_rep)
 		self.assertEqual(agent._FILE.get_nowait()["token"], "salon1")
 
@@ -111,8 +111,8 @@ class TestEndpoint(unittest.TestCase):
 		code, _ = self.serveur.poster("/v1/recording", corps_, aleatoire=nonce)
 		self.assertEqual(code, 202)
 		# MÊME CORPS, MÊME NONCE : la signature est valide, et c'est justement le
-		# cas que la fenêtre doit arrêter — sinon une notification capturée
-		# ouvrirait un second travail pour le même salon.
+		# case the window must stop — otherwise a captured notification would
+		# open a second job for the same room.
 		code, _ = self.serveur.poster("/v1/recording", corps_, aleatoire=nonce)
 		self.assertEqual(code, 400)
 		vider_file()
@@ -205,14 +205,14 @@ class TestSansWebm(unittest.TestCase):
 class TestCitationDesChemins(unittest.TestCase):
 	"""Le chemin du .srt porte l'identifiant Nextcloud, qui accepte l'apostrophe.
 
-	Le test exécute la VRAIE commande, avec un vrai `sh`, dans un dossier dont
-	le nom contient "o'brien x" : si la quotation manque, le fichier n'est pas
-	écrit là où on regarde — exactement ce qui arriverait dans le pod.
+	The test runs the REAL command, with a real `sh`, in a directory whose name
+	contains "o'brien x": without quoting, the file is not written where we look
+	— exactly what would happen in the pod.
 	"""
 
 	def test_un_identifiant_avec_apostrophe_et_espace(self):
 		tmp = tempfile.mkdtemp()
-		# LE DOSSIER QUE NEXTCLOUD CRÉE POUR UN TEL UTILISATEUR.
+		# THE DIRECTORY NEXTCLOUD CREATES FOR SUCH A USER.
 		dossier = os.path.join(tmp, "o'brien x", "files", "Talk", "Recording", "tok1234")
 		os.makedirs(dossier)
 		chemin_srt = os.path.join(dossier, "Recording 2026-10-28 10-00-00.srt")
@@ -221,19 +221,19 @@ class TestCitationDesChemins(unittest.TestCase):
 
 		subprocess.run(agent.commande_ecriture(chemin_srt, b64), check=True)
 
-		self.assertTrue(os.path.exists(chemin_srt), "le .srt n'a pas été écrit : la quotation manque")
+		self.assertTrue(os.path.exists(chemin_srt), "the .srt was not written: quoting is missing")
 		with open(chemin_srt, encoding="utf-8") as f:
 			self.assertEqual(f.read(), contenu)
 
 	def test_une_injection_ne_s_execute_pas(self):
-		# LE JETON EST REFUSÉ EN AMONT, ceci est la seconde barrière : même si un
-		# chemin contenant un point-virgule arrivait ici, il doit rester un NOM de
-		# fichier, pas une commande. On l'exécute pour le prouver.
+		# THE TOKEN IS REFUSED UPSTREAM; this is the second barrier: even a path
+		# containing a semicolon must stay a FILE NAME, not a command. It is run
+		# to prove it.
 		tmp = tempfile.mkdtemp()
 		piege = os.path.join(tmp, "x; touch pirate_injecte ;.srt")
 		subprocess.run(agent.commande_ecriture(piege, "YWJj"), check=True, cwd=tmp)
 		self.assertFalse(os.path.exists(os.path.join(tmp, "pirate_injecte")),
-			"le point-virgule a été interprété : la valeur n'est pas quotée")
+			"the semicolon was interpreted: the value is not quoted")
 		self.assertTrue(os.path.exists(piege), "le fichier au nom bizarre doit exister, lui")
 
 
@@ -244,10 +244,10 @@ if __name__ == "__main__":
 class TestCheminDeScan(unittest.TestCase):
 	"""The path `occ files:scan` receives.
 
-	CE BUG-LÀ A COÛTÉ UN VRAI ENREGISTREMENT : un `dossier = ...` local masquait
-	la fonction `dossier()`, et le dépôt levait UnboundLocalError après une
-	transcription réussie. Le test couvre la conversion de chemin, la seule
-	partie qui peut être fausse sans qu'on le voie dans les journaux.
+	THIS BUG COST A REAL RECORDING: a local `dossier = ...` shadowed the
+	`dossier()` function, and the deposit raised UnboundLocalError after a
+	successful transcription. The test covers the path conversion, the one part
+	that can be wrong without showing in the logs.
 	"""
 
 	def test_chemin_relatif_a_la_racine_des_donnees(self):
@@ -256,8 +256,8 @@ class TestCheminDeScan(unittest.TestCase):
 			"amina/files/Talk/Recording/tok")
 
 	def test_chemin_hors_racine_rendu_tel_quel(self):
-		# Un chemin inattendu ne doit pas être tronqué au hasard : mieux vaut un
-		# scan qui échoue franchement qu'un chemin qui désigne un autre dossier.
+		# An unexpected path must not be truncated at random: a scan that fails
+		# loudly is better than a path pointing at another directory.
 		self.assertEqual(agent.chemin_scan("/autre/endroit/x.webm"), "/autre/endroit")
 
 
@@ -312,11 +312,11 @@ class TestArretPropre(unittest.TestCase):
 		tmp, marqueur, ferme, proc = self._capture(obeissant=True)
 		agent.arreter("salon1")
 		self.assertTrue(os.path.exists(ferme), "le client n'a pas eu le temps de fermer : "
-			"l'audio serait resté dans le tampon de PyAV")
+			"the audio would have stayed in PyAV's buffer")
 		self.assertEqual(proc.returncode, 0)
 
 	def test_un_client_bloque_est_fini_par_le_signal(self):
 		tmp, marqueur, ferme, proc = self._capture(obeissant=False)
 		agent.arreter("salon1")
 		self.assertFalse(os.path.exists(ferme))
-		self.assertIsNotNone(proc.returncode, "le processus bloqué doit être arrêté de force")
+		self.assertIsNotNone(proc.returncode, "the stuck process must be killed")

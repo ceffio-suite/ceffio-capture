@@ -86,13 +86,13 @@ class TestLecture(unittest.TestCase):
 			"1234567890123456789012345678901234567890123456789012345678901234567890"]:
 			corps = json.loads(avis("start"))
 			corps["token"] = jeton
-			with self.assertRaises(notification.Refus, msg="jeton %r accepté" % jeton) as ctx:
+			with self.assertRaises(notification.Refus, msg="token %r accepted" % jeton) as ctx:
 				notification.lire(json.dumps(corps).encode())
 			self.assertEqual(ctx.exception.code, 400, "jeton %r : code %s" % (jeton, ctx.exception.code))
 
 	def test_jetons_legitimes_acceptes(self):
-		# 8 caractères alphanumériques (Talk), 10 chiffres (SIP), et la marge
-		# de longueur qu'on s'autorise.
+		# 8 alphanumeric characters (Talk), 10 digits (SIP), and the length
+		# margin we allow ourselves.
 		for jeton in ["7kxkkuxm", "1234567890", "abcd", "A1b2C3d4"]:
 			corps = json.loads(avis("start"))
 			corps["token"] = jeton
@@ -113,10 +113,10 @@ class TestLecture(unittest.TestCase):
 
 
 class TestRejeu(unittest.TestCase):
-	"""La signature prouve l'origine ; elle ne prouve pas la NOUVEAUTÉ."""
+	"""The signature proves the origin; it does not prove the NOVELTY."""
 
 	def maintenant(self):
-		return 1793200000.0  # une seconde fixe, pour un test déterministe
+		return 1793200000.0  # a fixed second, for a deterministic test
 
 	def at(self, decalage):
 		return datetime.fromtimestamp(self.maintenant() + decalage, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -190,7 +190,7 @@ class TestEtat(unittest.TestCase):
 		etat.commence("salon1")
 		etat.commence("salon2")
 		etat.termine("salon1")
-		# salon2 continue : un stop dans un salon ne doit pas arrêter l'autre.
+		# salon2 goes on: a stop in one room must not stop the other.
 		self.assertEqual(etat.commence("salon2"), (False, True))
 
 

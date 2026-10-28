@@ -46,6 +46,27 @@ jobs:
           platforms: linux/amd64
           push: false
 
+      - name: Compute the tags
+        # A PRE-RELEASE IS NEVER `latest`. Publishing `:latest` on every `v*`
+        # tag means an `-rc.1` becomes the version everyone pulls by default —
+        # the release channel would offer a candidate as if it were the product.
+        # Same rule as the main repository's release.yml.
+        if: github.event_name != 'pull_request'
+        id: tags
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TAGS="ghcr.io/ceffio-suite/ceffio-capture:${TAG}"
+          case "$TAG" in
+            *-*) echo "prerelease tag: ':latest' is NOT updated" ;;
+            *)   TAGS="${TAGS}"$'\n'"ghcr.io/ceffio-suite/ceffio-capture:latest" ;;
+          esac
+          {
+            echo "liste<<FIN_TAGS"
+            echo "$TAGS"
+            echo "FIN_TAGS"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push (tagged release)
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
@@ -53,6 +74,25 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/ceffio-suite/ceffio-capture:${{ github.ref_name }}
-            ghcr.io/ceffio-suite/ceffio-capture:latest
+          # THE IMAGE CARRIES ITS OWN BILL OF MATERIALS AND ITS PROVENANCE, so
+          # an operator can ask the registry what is inside, and how it was
+          # built, without trusting a release note.
+          sbom: true
+          provenance: mode=max
+          tags: ${{ steps.tags.outputs.liste }}
+
+      - name: Prove the image carries its SBOM and its provenance
+        # "The build said pushed" proves nothing about the attestation; this
+        # reads it back from the registry, the way an operator would.
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/ceffio-suite/ceffio-capture:${GITHUB_REF_NAME}"
+          for ATTESTATION in SBOM Provenance; do
+            VALEUR="$(docker buildx imagetools inspect "$IMAGE" --format "{{ json .${ATTESTATION} }}")"
+            echo "${ATTESTATION} of ${IMAGE}: $(echo "$VALEUR" | head -c 300)"
+            if [ -z "$VALEUR" ] || [ "$VALEUR" = "null" ]; then
+              echo "::error::${IMAGE} carries no ${ATTESTATION} attestation"
+              exit 1
+            fi
+          done

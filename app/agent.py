@@ -51,8 +51,8 @@ DELAI_ARRET = float(os.environ.get("CEFFIO_STOP_GRACE", "10"))
 
 _FILE = queue.Queue()
 _etat = notification.Etat()
-# LA FENÊTRE ANTI-REJEU, partagée par tout le service : un nonce vu une fois ne
-# l'est plus jamais pendant deux minutes, quel que soit le salon.
+# THE REPLAY WINDOW, shared by the whole service: a nonce seen once is refused
+# for the next two minutes, whichever room it names.
 _rejeu = notification.Rejeu()
 
 
@@ -142,16 +142,15 @@ def executer(namespace, pod, commande, entree=None, conteneur=None):
 
 
 def webm_de_la_salle(jeton):
-	"""Les .webm du salon, trouvés par find, SANS SHELL.
+	"""The room's .webm files, found by find, WITHOUT A SHELL.
 
-	LE JETON EST VALIDÉ À L'ENTRÉE (notification.lire), mais il ne doit pas
-	pour autant être une parole de shell : il vient d'une requête dont la
-	signature ne couvre PAS le chemin. Ici il est un ARGUMENT de find, et il ne
-	peut plus rien exécuter.
+	THE TOKEN IS VALIDATED AT THE DOOR (notification.lire), but it must not
+	become a shell word either: it comes from a request whose signature does NOT
+	cover the path. Here it is an ARGUMENT of find, and it can execute nothing.
 
-	splitlines(), pas split() : un nom d'enregistrement contient des espaces
-	("Recording 2026-10-25 23-00-52.webm") et un découpage sur les blancs
-	rendait des fragments qui se lisent comme une date.
+	splitlines(), not split(): a recording name contains spaces
+	("Recording 2026-10-25 23-00-52.webm"), and splitting on whitespace returned
+	fragments that parse as a date.
 	"""
 	pod = pod_de(NS_FILES, "app=nextcloud")
 	motif = "*/files/Talk/Recording/%s/*.webm" % jeton
@@ -199,14 +198,13 @@ def nettoyer(jeton):
 	(CEFFIO_KEEP_FAILED_HOURS, 24 h by default) so it can be retried.
 	"""
 	base = dossier(jeton)
-	# DÉFENSE EN PROFONDEUR : même validé à l'entrée, le jeton ne doit jamais
-	# pouvoir désigner autre chose que SON dossier. rmtree sur un chemin calculé
-	# est une suppression de fichiers arbitraire si un jour la validation se
-	# relâche.
+	# DEFENCE IN DEPTH: even validated at the door, the token must never be able
+	# to designate anything but ITS OWN directory. rmtree on a computed path is an
+	# arbitrary file deletion the day the validation loosens.
 	racine = os.path.realpath(os.path.join(TRAVAIL, "salons"))
 	cible = os.path.realpath(base)
 	if cible != os.path.join(racine, jeton) or not cible.startswith(racine + os.sep):
-		print(f"nettoyer: {base!r} sort du dossier de travail, ignoré", flush=True)
+		print(f"nettoyer: {base!r} is outside the work directory, ignored", flush=True)
 		return
 	dernier = _dernier.get("room") == jeton and _dernier.get("result") == "failed"
 	if dernier:
@@ -300,9 +298,9 @@ def deposer(jeton, etat, chemin_webm):
 	with open(srt, "rb") as f:
 		donnees = base64.b64encode(f.read()).decode("ascii")
 
-	# TOUT CE QUI EST INTERPOLÉ EST QUOTÉ. Le chemin contient l'identifiant
-	# Nextcloud, qui accepte l'apostrophe et l'espace ("o'brien x") : sans
-	# quotation, le shell couperait le chemin et écrirait ailleurs.
+	# EVERYTHING INTERPOLATED IS QUOTED. The path contains the Nextcloud user id,
+	# which accepts an apostrophe and a space ("o'brien x"): unquoted, the shell
+	# would cut the path and write somewhere else.
 	chemin_srt = base + ".srt"
 	executer(NS_FILES, pod, commande_ecriture(chemin_srt, donnees))
 	# chown n'a besoin d'aucun shell : des arguments, et rien d'autre.
@@ -319,12 +317,12 @@ def deposer(jeton, etat, chemin_webm):
 
 
 def commande_ecriture(chemin_srt, donnees_b64):
-	"""La commande qui écrit le .srt, les deux valeurs QUOTÉES.
+	"""The command that writes the .srt, both values QUOTED.
 
-	Une redirection a besoin d'un shell ; on le garde donc pour ce seul geste,
-	et chaque valeur qui y entre passe par shlex.quote. Le chemin porte
-	l'identifiant Nextcloud, qui accepte l'apostrophe et l'espace : c'est le cas
-	que le test couvre, avec "o'brien x".
+	A redirection needs a shell, so it is kept for that single gesture, and every
+	value entering it goes through shlex.quote. The path carries the Nextcloud
+	user id, which accepts an apostrophe and a space: the test covers exactly
+	that, with "o'brien x".
 	"""
 	return ["sh", "-c", "printf %%s %s | base64 -d > %s"
 		% (shlex.quote(donnees_b64), shlex.quote(chemin_srt))]
@@ -537,11 +535,11 @@ class Sante(BaseHTTPRequestHandler):
 			self._repond(refus.code, str(refus).encode())
 			return
 
-		# APRÈS LA SIGNATURE, AVANT LA FILE : une notification authentique mais
-		# rejouée n'a pas à ouvrir un second travail. Le nonce est celui qui a
-		# servi à signer.
+		# AFTER THE SIGNATURE, BEFORE THE QUEUE: an authentic but replayed
+		# notification must not open a second job. The nonce is the one that
+		# signed it.
 		if raison := _rejeu.accepter(self.headers.get("Ceffio-Relay-Random", ""), avis.get("at")):
-			print(f"notification refusée : {raison}", flush=True)
+			print(f"notification refused: {raison}", flush=True)
 			self._repond(400, raison.encode())
 			return
 

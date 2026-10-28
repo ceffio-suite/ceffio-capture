@@ -28,22 +28,21 @@ from datetime import datetime
 # the secret — or one without — cannot make this process read a report.
 MAX_BODY = 4096
 
-# LA FENÊTRE ANTI-REJEU, en secondes.
+# THE REPLAY WINDOW, in seconds.
 FENETRE = 120
 
 TYPES = ("start", "stop")
 
-# LE JETON N'EST COUVERT PAR AUCUNE SIGNATURE : Talk signe random + body, pas le
-# chemin. Il arrive donc d'une requête authentique dont UN CHAMP n'est pas
-# authentifié, et il finit dans des chemins de fichiers. On n'accepte que la
-# forme qu'un jeton Talk peut avoir — alphanumérique — ce qui exclut '/' , '.',
-# ';', '|', '$', l'espace et les apostrophes.
+# THE TOKEN IS COVERED BY NO SIGNATURE: Talk signs random + body, not the path.
+# It therefore arrives in an authentic request whose ONE FIELD is not
+# authenticated, and it ends up in file paths. Only the shape a Talk token can
+# have is accepted — alphanumeric — which excludes '/', '.', ';', '|', '$',
+# spaces and quotes.
 #
-# L'ALPHABET EXACT DE TALK est plus étroit (8 caractères parmi CHAR_LOWER +
-# CHAR_DIGITS privés de "l", "0", "1", ou 10 chiffres si SIP est configuré),
-# mais le resserrer rejetterait les jetons d'une autre version ou d'une autre
-# configuration pour un gain de sécurité nul : ce qu'on veut interdire, c'est le
-# métacaractère, pas une lettre.
+# TALK'S EXACT ALPHABET IS NARROWER (8 characters from CHAR_LOWER + CHAR_DIGITS
+# minus "l", "0", "1", or 10 digits when SIP is configured), but tightening to
+# it would reject tokens from another version or configuration for no security
+# gain: what must be forbidden is the metacharacter, not a letter.
 JETON = re.compile(r"[A-Za-z0-9]{4,64}")
 
 
@@ -87,8 +86,8 @@ def lire(corps):
 		raise Refus("unknown notification type: %r" % (avis.get("type"),))
 	jeton = avis.get("token")
 	if not isinstance(jeton, str) or not JETON.fullmatch(jeton):
-		# UN SEUL REFUS POUR "ABSENT" ET "MAL FORMÉ" : le message n'a pas à
-		# expliquer à un appelant ce qui manque à son jeton.
+		# ONE REFUSAL FOR "ABSENT" AND "MALFORMED": the message does not have to
+		# tell a caller what is wrong with their token.
 		raise Refus("invalid room token")
 	return avis
 
@@ -125,18 +124,17 @@ class Etat:
 
 
 class Rejeu:
-	"""Refuse une notification rejouée, ou trop vieille.
+	"""Refuse a notification that is replayed, or too old.
 
-	POURQUOI LA SIGNATURE NE SUFFIT PAS : elle prouve que le message vient du
-	relais, pas QU'IL EST NOUVEAU. Une notification capturée — dans un journal, un
-	proxy, une capture de trafic — peut être renvoyée telle quelle, et la capture
-	ouvrirait une seconde transcription pour le même salon, ou arrêterait celle
-	qui vient de commencer.
+	WHY THE SIGNATURE IS NOT ENOUGH: it proves the message comes from the relay,
+	not that it is NEW. A captured notification — from a log, a proxy, a traffic
+	capture — can be sent again as-is, and the capture would open a second
+	transcription for the same room, or stop the one that just began.
 
-	DEUX BARRIÈRES : le champ `at` borne la fenêtre (deux minutes, largement plus
-	que le délai réel d'un relais local), et le nonce `Ceffio-Relay-Random` est
-	mémorisé pendant cette même fenêtre — deux corps identiques ne peuvent donc
-	pas être acceptés deux fois.
+	TWO BARRIERS: the `at` field bounds the window (two minutes, far more than the
+	real delay of a local relay), and the `Ceffio-Relay-Random` nonce is
+	remembered for that same window — two identical bodies can therefore never be
+	accepted twice.
 	"""
 
 	def __init__(self, fenetre=FENETRE, horloge=None):
@@ -146,7 +144,7 @@ class Rejeu:
 		self._verrou = threading.Lock()
 
 	def accepter(self, aleatoire, at):
-		"""Rend None si la notification est acceptable, la raison sinon."""
+		"""None when the notification is acceptable, the reason otherwise."""
 		maintenant = self._horloge()
 		if not at:
 			return "no timestamp"
@@ -157,8 +155,8 @@ class Rejeu:
 		if abs(maintenant - quand) > self._fenetre:
 			return "timestamp outside the window"
 		with self._verrou:
-			# PURGE À CHAQUE APPEL : la mémoire ne suit pas la durée de vie du
-			# processus, elle suit la fenêtre.
+			# PURGED ON EVERY CALL: memory follows the window, not the lifetime
+			# of the process.
 			for nonce, expiration in list(self._vus.items()):
 				if expiration <= maintenant:
 					del self._vus[nonce]

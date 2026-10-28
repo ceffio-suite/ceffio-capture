@@ -1,0 +1,7 @@
+# A vulnerability is not an issue: a public report is indexed within hours, and
+# the reporter cannot withdraw it.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/ceffio-suite/ceffio-capture/security/advisories/new
+    about: Never in a public issue. Private reporting, or security@mandem-it.com — see SECURITY.md.

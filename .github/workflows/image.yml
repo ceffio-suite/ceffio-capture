@@ -5,6 +5,10 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # A VULNERABILITY FOUND AFTER THE RELEASE MUST BE SEEN WITHOUT WAITING FOR THE
+  # NEXT ONE. Weekly, on the published image.
+  schedule:
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -96,3 +100,64 @@ jobs:
               exit 1
             fi
           done
+  # THE IMAGE WE PUBLISH IS SCANNED, AND STAYS SCANNED: the tag does not change,
+  # the vulnerability database does.
+  scan:
+    name: scan the published image
+    needs: build
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Scan the image
+        id: grype
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          # ON A TAG, THAT TAG; ON THE WEEKLY RUN, `latest` — the version an
+          # installation pulls today.
+          image: ghcr.io/ceffio-suite/ceffio-capture:${{ github.event_name == 'schedule' && 'latest' || github.ref_name }}
+          # THE SAME RULE AS THE REST OF THE SUITE: only a CRITICAL finding WITH a
+          # fix stops the build. Everything else is reported.
+          severity-cutoff: critical
+          only-fixed: true
+          fail-build: true
+          output-format: json
+          output-file: grype-capture.json
+          grype-version: v0.121.0
+          cache-db: true
+
+      - name: Summarise the scan
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -s grype-capture.json ]; then
+            echo "### Grype, image ceffio-capture — aucun rapport produit" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - grype-capture.json >> "$GITHUB_STEP_SUMMARY" <<'FIN_PYTHON'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          matches = d.get("matches") or []
+          ordre = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"]
+          compte = {s: [0, 0] for s in ordre}
+          for m in matches:
+              sev = (m.get("vulnerability") or {}).get("severity") or "Unknown"
+              fixe = ((m.get("vulnerability") or {}).get("fix") or {}).get("state") == "fixed"
+              if sev not in compte:
+                  sev = "Unknown"
+              compte[sev][0] += 1
+              if fixe:
+                  compte[sev][1] += 1
+          print("### Grype, image ceffio-capture")
+          print()
+          print("| Sévérité | Total | Avec correctif |")
+          print("|---|---|---|")
+          for s in ordre:
+              total, fixe = compte[s]
+              if total or s == "Critical":
+                  print("| %s | %d | %d |" % (s, total, fixe))
+          print()
+          print("%d vulnérabilité(s) au total, %d avec un correctif."
+                % (sum(c[0] for c in compte.values()), sum(c[1] for c in compte.values())))
+          FIN_PYTHON

@@ -1,0 +1,40 @@
+version: 2
+
+# ROUTINE UPDATES ONLY. Security updates (a vulnerable dependency) are handled by
+# Dependabot alerts and automated security fixes, both already enabled on this
+# repository: this file adds the scheduled ones.
+#
+# GROUPS, BECAUSE FIFTY PULL REQUESTS IS THE SAME AS NONE: one PR per ecosystem
+# per week for minor and patch. A MAJOR stays alone, with its own diff — that is
+# where a human has to read before merging.
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    groups:
+      python-deps:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: deps(pip)
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 3
+    groups:
+      images:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: deps(docker)
+

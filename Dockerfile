@@ -9,7 +9,7 @@
 # reproducible appliance cannot afford. The digest below is the
 # MULTI-ARCHITECTURE INDEX, so the build keeps resolving linux/amd64 by
 # platform instead of being frozen to one architecture.
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+FROM python:3.14-slim@sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8
 
 # ffmpeg: muxing subtitles into the .webm (stream copy, no re-encode).
 RUN apt-get update \

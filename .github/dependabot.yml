@@ -22,6 +22,21 @@ updates:
         update-types: ["minor", "patch"]
     commit-message:
       prefix: deps(pip)
+    # THREE MAJORS THAT CANNOT MOVE ALONE, closed with their reason rather than
+    # reopened every Monday (PRs #10, #11 and #8):
+    #
+    #   av          aiortc 1.15 pins it; the pair must move together, and the
+    #               capture must be re-run — PyAV is what decodes the audio.
+    #   kubernetes  37 pulls a pydantic range that conflicts with the pinned
+    #               one; both move together or neither.
+    #
+    # LIFT THE RULE WITH THE GROUPED BUMP, not before: an ignore is a decision
+    # with a date on it, not a habit.
+    ignore:
+      - dependency-name: av
+        update-types: ["version-update:semver-major"]
+      - dependency-name: kubernetes
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /
@@ -37,4 +52,10 @@ updates:
         update-types: ["minor", "patch"]
     commit-message:
       prefix: deps(docker)
+    # THE BASE IMAGE CANNOT SIMPLY FOLLOW THE LATEST PYTHON: onnxruntime, through
+    # faster-whisper, does not publish a wheel for it — the build fails at pip
+    # install, which is the truth about what can run, not a preference.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major"]
 

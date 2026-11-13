@@ -9,7 +9,11 @@
 # reproducible appliance cannot afford. The digest below is the
 # MULTI-ARCHITECTURE INDEX, so the build keeps resolving linux/amd64 by
 # platform instead of being frozen to one architecture.
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+#
+# 3.12.16 (2026-11-05): this interpreter carries the fix of CVE-2026-115557,
+# which the image scan reported against 3.12.15 and which blocked the v0.8.4
+# image.
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
 # ffmpeg: muxing subtitles into the .webm (stream copy, no re-encode).
 RUN apt-get update \

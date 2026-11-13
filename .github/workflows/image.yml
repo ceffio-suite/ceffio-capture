@@ -161,3 +161,17 @@ jobs:
           print("%d vulnérabilité(s) au total, %d avec un correctif."
                 % (sum(c[0] for c in compte.values()), sum(c[1] for c in compte.values())))
           FIN_PYTHON
+
+      # THE REPORT OUTLIVES THE JOB. A scan that fails is the scan whose report
+      # matters most, and until now it was written to the runner's disk and lost
+      # with the job: investigating the refusal of v0.8.4 meant rebuilding the
+      # image and replaying the scan elsewhere to learn WHICH finding blocked it.
+      # Uploading it on failure as well as on success removes that detour.
+      - name: Keep the scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: grype-capture
+          path: grype-capture.json
+          if-no-files-found: warn
+          retention-days: 90

@@ -2,8 +2,8 @@
 # transcription, ceffio.org) : les reproduire évite de découvrir, en
 # production, qu'un changement d'API de websockets casse l'abonnement.
 aiortc==1.15.0
-websockets==17.3
-pydantic==2.14.1
+websockets==17.4
+pydantic==2.14.3
 numpy==2.5.4
 av==17.1.0
 faster-whisper==1.2.1
